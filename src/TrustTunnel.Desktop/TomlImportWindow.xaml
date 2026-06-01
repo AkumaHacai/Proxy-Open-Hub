@@ -1,0 +1,26 @@
+<Window x:Class="TrustTunnel.Desktop.TomlImportWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Импорт TOML" Width="620" Height="520" MinWidth="520" MinHeight="420"
+        WindowStartupLocation="CenterOwner" UseLayoutRounding="True">
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <StackPanel Grid.Row="0" Margin="0,0,0,14">
+            <TextBlock Text="Импорт TOML" FontSize="24" FontWeight="SemiBold" />
+            <TextBlock Text="Вставьте TOML-конфиг. Пароли будут перенесены в secret store." Foreground="{DynamicResource MutedTextBrush}" />
+        </StackPanel>
+        <TextBox x:Name="TomlTextBox" Grid.Row="1" FontFamily="Consolas" AcceptsReturn="True" AcceptsTab="True"
+                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" />
+        <DockPanel Grid.Row="2" Margin="0,14,0,0">
+            <TextBlock x:Name="ResultText" DockPanel.Dock="Left" Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap" />
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button Content="Импортировать" Click="ImportButton_Click" />
+                <Button Content="Отмена" IsCancel="True" Style="{StaticResource GhostButton}" />
+            </StackPanel>
+        </DockPanel>
+    </Grid>
+</Window>

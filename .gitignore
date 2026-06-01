@@ -53,3 +53,27 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# ==========================================
+# Visual Studio Specific
+# ==========================================
+.vs/
+[Bb]in/
+[Oo]bj/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VisualState.xml
+
+# Visual Studio Build Output
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+
+# Upgrade Log files
+Backup/
+UpgradeLog*.XML
+UpgradeLog*.htm
+
