@@ -8,7 +8,7 @@
 
 > Windows desktop proxy/VPN client for TrustTunnel. Planned adapters: sing-box, Xray-core, Hysteria2 and NaiveProxy.
 >
-> English version: [README.en.md](README.en.md)
+> English version: [README.en.md](README.md)
 
 Proxy Open Hub — независимый клиент для Windows на WPF и .NET.
 
