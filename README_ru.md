@@ -84,13 +84,6 @@ Proxy Open Hub — независимый клиент для Windows на WPF �
 
 ## Дорожная карта
 
-### Ближайшее
-
-- [ ] Добавить GitHub description, topics и social preview.
-- [ ] Опубликовать первый `v0.1.0-alpha` release.
-- [ ] Починить install/readme path для обычного пользователя.
-- [ ] Добавить реальные screenshots UI.
-
 ### Архитектура
 
 - [ ] Ввести `CoreKind`.
