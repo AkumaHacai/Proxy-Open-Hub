@@ -86,13 +86,6 @@ Short and honest: this is not a multi-core client yet. Right now it is a TrustTu
 
 ## Roadmap
 
-### Near term
-
-- [ ] Add GitHub description, topics and social preview.
-- [ ] Publish the first `v0.1.0-alpha` release.
-- [ ] Fix the install/readme path for normal users.
-- [ ] Add real UI screenshots.
-
 ### Architecture
 
 - [ ] Introduce `CoreKind`.
