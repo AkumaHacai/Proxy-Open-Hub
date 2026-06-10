@@ -73,6 +73,25 @@ public sealed class CountryFlagConverter : IValueConverter
     }
 }
 
+public sealed class CountryCodeTextConverter : IValueConverter
+{
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        var code = value?.ToString()?.Trim().ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(code) || code.Length != 2 || code.Any(ch => ch is < 'A' or > 'Z'))
+        {
+            return "TT";
+        }
+
+        return code;
+    }
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        throw new NotSupportedException();
+    }
+}
+
 public sealed class MbpsTextConverter : IValueConverter
 {
     public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)

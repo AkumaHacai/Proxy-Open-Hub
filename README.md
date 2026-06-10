@@ -1,44 +1,44 @@
-# TrustTunnel GUI Client
+# Proxy Open Hub
 
-Windows MVP client shell for TrustTunnel.
+![Proxy Open Hub logo](logo/proxy-open-hub-horizontal.svg)
 
-This repository follows the architecture described in the project notes:
+Proxy Open Hub is a Windows desktop proxy/VPN hub built with WPF and .NET. The current working core is the official TrustTunnel Windows core, and the UI is being prepared for optional cores such as sing-box, NaiveProxy, Xray-core, and Hysteria2.
 
-```text
-WPF UI
-  -> application service
-  -> typed config model / validators
-  -> secret storage abstraction
-  -> TOML builder / parser
-  -> VPN controller facade
-  -> native TrustTunnel bridge
-```
+The project is not the official TrustTunnel client. It is an independent desktop shell that imports profiles, stores typed settings, generates TrustTunnel TOML, and launches the bundled/installed native core.
 
-The desktop app talks to `IVpnController`; the bundled `NativeBridgeVpnController` validates profiles, resolves secrets into generated TOML, checks Windows TUN preconditions, and calls the official Windows `vpn_easy` ABI when the native files are placed next to the desktop executable. If the official release package only provides `trusttunnel_client.exe`, the controller can run that CLI core as a fallback process.
+## Current Status
+
+Alpha. The main TrustTunnel workflow is usable, but the project still needs hardening before a public stable release:
+
+- stronger persistent secret storage through Windows Credential Manager or DPAPI;
+- signed installer/update flow;
+- full manual QA for TUN, SOCKS5, HTTP proxy, service mode, tray behavior, and system proxy behavior;
+- trusted download/install flow for optional future cores;
+- broader UI translation review for Russian, English, Chinese, and Persian.
 
 ## Implemented
 
-- Windows WPF app on .NET.
-- `tt://?...` import module with a bundled TrustTunnel test vector.
-- TOML import module for endpoint/listener settings.
-- Typed config model for endpoint, listener, TUN, SOCKS, routing profile, server profile.
-- Validators for host:port, DNS upstreams, CIDR routes, exclusions, MTU, certificate warning.
-- TOML builder from typed model with string/array escaping.
-- Secret storage abstraction; MVP uses in-memory storage so plaintext secrets are not written to local profile config.
-- Connection state machine with guarded transitions.
-- Redacting diagnostic log for `tt://`, password, client random and certificate fields.
-- Profile management in the GUI: edit, validate, duplicate, delete, and export TOML.
-- Persistent desktop state in `%LOCALAPPDATA%\TrustTunnel\desktop-state.json` for profiles, routing profiles, app settings, and MVP secrets.
-- Toggle-driven GUI fields for boolean config options such as IPv6, anti-DPI, post-quantum group, skip certificate verification, kill switch, system DNS changes, and existing TUN reuse.
-- Routing/DNS editor for split tunneling mode, exclusions, included/excluded routes, kill switch allow ports, DNS upstreams, MTU, and TCP buffers.
-- Advanced editor for SOCKS5, TUN device options, client random, certificate PEM, and fallback transport.
-- Native runtime loader for `vpn_easy.dll`, direct connect/disconnect, optional Windows service mode through `vpn_easy_service.exe`, and CLI fallback through `trusttunnel_client.exe`.
-- Server diagnostics for bundled native core files, Windows TUN requirements, ping, and HTTPS checks.
-- Console smoke tests without external test packages.
+- Modern WPF interface with expanded and compact modes.
+- Proxy Open Hub application icon, taskbar icon, tray icon, and branded logo assets.
+- Tray behavior: close button hides the window, tray menu can reopen or exit.
+- `tt://?...` TrustTunnel profile import.
+- TOML import, TOML editor, copy/save workflow with sensitive-data preview toggle.
+- Manual server creation.
+- Typed config model for endpoint, listener, TUN, SOCKS5, routing, server profiles, and app settings.
+- Routing profiles with simple presets for local network and RU bypass rules.
+- Validators for host:port, DNS upstreams, CIDR routes, exclusions, MTU, and unsafe certificate settings.
+- Secret store abstraction; current desktop implementation keeps MVP secrets in the local app state.
+- SOCKS5 credentials are generated automatically when missing.
+- System proxy toggle for SOCKS5 profiles.
+- Connection state machine and redacted logs.
+- Live network metrics from OS counters while connected.
+- Server diagnostics for native files, TUN prerequisites, ping, and HTTPS access checks.
+- Localization: English, Russian, Chinese, Persian, with system-language default on first launch.
+- Native runtime loader for `vpn_easy.dll`, service mode via `vpn_easy_service.exe`, and CLI fallback via `trusttunnel_client.exe`.
 
 ## Native Core Files
 
-Copy the official Windows native files into the app output directory, for example `src\TrustTunnel.Desktop\bin\Debug\net10.0-windows`.
+Official native files can be placed in `native/bundled/win-x64` or copied next to the built desktop executable.
 
 Preferred ABI integration:
 
@@ -53,16 +53,19 @@ Release-package CLI fallback:
 
 More details: `docs/native-core-integration.md`.
 
-## Next Native Integration Steps
-
-1. Replace the in-memory `ISecretStore` with Windows Credential Manager or DPAPI backed storage.
-2. Add a repeatable upstream native build step once CMake/MSVC/Conan/Rust are available on the machine.
-3. Add durable SQLite/profile repository.
-
 ## Commands
 
 ```powershell
 dotnet restore --configfile .\NuGet.Config
-dotnet build .\TrustTunnelGuiClient.sln --configfile .\NuGet.Config
-dotnet run --project .\tests\TrustTunnel.Tests\TrustTunnel.Tests.csproj --no-restore
+dotnet build .\TrustTunnelGuiClient.sln --no-restore
+dotnet run --project .\tests\TrustTunnel.Tests\TrustTunnel.Tests.csproj --no-build
+dotnet format .\TrustTunnelGuiClient.sln --verify-no-changes --no-restore
 ```
+
+The desktop binary is emitted as `ProxyOpenHub.exe`.
+
+## License
+
+Proxy Open Hub source code is licensed under the Apache License 2.0. See `LICENSE.txt`.
+
+Bundled native components and future downloadable cores keep their own licenses. See `NOTICE.md` and the license files shipped beside each native binary.

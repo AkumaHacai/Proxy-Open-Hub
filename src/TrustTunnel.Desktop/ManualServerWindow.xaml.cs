@@ -12,6 +12,7 @@ public partial class ManualServerWindow : Window
     public ManualServerWindow(ISecretStore secretStore)
     {
         InitializeComponent();
+        DialogChrome.Apply(this);
         _secretStore = secretStore;
     }
 

@@ -11,6 +11,7 @@ public partial class TomlImportWindow : Window
     public TomlImportWindow(TrustTunnelAppService appService)
     {
         InitializeComponent();
+        DialogChrome.Apply(this);
         _appService = appService;
     }
 

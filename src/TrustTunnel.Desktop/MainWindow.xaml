@@ -1,405 +1,1323 @@
 <Window x:Class="TrustTunnel.Desktop.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:TrustTunnel.Desktop"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
-        Title="Trust Client" Width="960" Height="620" ResizeMode="CanResizeWithGrip"
-        WindowStartupLocation="CenterScreen" SizeToContent="Manual" UseLayoutRounding="True"
-        WindowStyle="None" AllowsTransparency="False" Background="Transparent">
+        Title="Proxy Open Hub"
+        Icon="Assets/proxy-open-hub.ico"
+        Width="920"
+        Height="600"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterScreen"
+        SizeToContent="Manual"
+        UseLayoutRounding="True"
+        WindowStyle="None"
+        AllowsTransparency="False"
+        Background="{DynamicResource AppBackgroundBrush}">
     <shell:WindowChrome.WindowChrome>
         <shell:WindowChrome CaptionHeight="0"
-                            ResizeBorderThickness="6"
+                            ResizeBorderThickness="0"
                             UseAeroCaptionButtons="False"
                             GlassFrameThickness="-1"
-                            NonClientFrameEdges="None" />
+                            NonClientFrameEdges="None"
+                            CornerRadius="26" />
     </shell:WindowChrome.WindowChrome>
+
+    <Window.Resources>
+        <Style x:Key="ChromeButton" TargetType="Button" BasedOn="{StaticResource TitleBarButton}">
+            <Setter Property="Width" Value="30" />
+            <Setter Property="Height" Value="30" />
+            <Setter Property="Margin" Value="0,0,6,0" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Foreground" Value="{DynamicResource MutedTextBrush}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="Root"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="9"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{DynamicResource ControlHoverBrush}" />
+                                <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Root" Property="Opacity" Value="0.75" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ChromeCloseButton" TargetType="Button" BasedOn="{StaticResource ChromeButton}">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="Root"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="9"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="#D94A43" />
+                                <Setter Property="Foreground" Value="White" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Root" Property="Opacity" Value="0.85" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="CoreTabButton" TargetType="Button" BasedOn="{StaticResource TitleBarButton}">
+            <Setter Property="Height" Value="34" />
+            <Setter Property="MinWidth" Value="122" />
+            <Setter Property="Padding" Value="9,0" />
+            <Setter Property="Margin" Value="0,0,4,0" />
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="Root"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="10,10,0,0"
+                                Padding="{TemplateBinding Padding}">
+                            <Grid>
+                                <Border Height="3"
+                                        CornerRadius="3"
+                                        Background="{DynamicResource AccentBrush}"
+                                        HorizontalAlignment="Stretch"
+                                        VerticalAlignment="Top"
+                                        Margin="0,-1,0,0" />
+                                <ContentPresenter HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center" />
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{DynamicResource ControlHoverBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="CoreAddButton" TargetType="Button" BasedOn="{StaticResource ChromeButton}">
+            <Setter Property="Width" Value="30" />
+            <Setter Property="Height" Value="30" />
+            <Setter Property="Margin" Value="4,0,0,0" />
+        </Style>
+
+        <Style x:Key="CompactCoreSelectorButton" TargetType="Button" BasedOn="{StaticResource TitleBarButton}">
+            <Setter Property="Height" Value="32" />
+            <Setter Property="MinWidth" Value="92" />
+            <Setter Property="Padding" Value="7,0" />
+            <Setter Property="Margin" Value="0,0,4,0" />
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="Root"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="11"
+                                Padding="{TemplateBinding Padding}"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{DynamicResource ControlHoverBrush}" />
+                                <Setter TargetName="Root" Property="BorderBrush" Value="{DynamicResource AccentBorderBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Root" Property="Opacity" Value="0.86" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="CoreMenuItemButton" TargetType="Button" BasedOn="{StaticResource TitleBarButton}">
+            <Setter Property="Height" Value="54" />
+            <Setter Property="Padding" Value="10,8" />
+            <Setter Property="Margin" Value="0,0,0,2" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="Root"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="{DynamicResource RadiusSm}"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Stretch"
+                                              VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{DynamicResource ControlHoverBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Root" Property="Opacity" Value="0.55" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="QuietPanel" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="{DynamicResource RadiusMd}" />
+            <Setter Property="UseLayoutRounding" Value="True" />
+        </Style>
+
+        <Style x:Key="MetricPanel" TargetType="Border" BasedOn="{StaticResource QuietPanel}">
+            <Setter Property="Width" Value="116" />
+            <Setter Property="Padding" Value="12,9" />
+            <Setter Property="Margin" Value="5,0" />
+            <Setter Property="CornerRadius" Value="{DynamicResource RadiusMd}" />
+        </Style>
+
+        <Style x:Key="ServerMetricChip" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="6,2" />
+            <Setter Property="HorizontalAlignment" Value="Left" />
+            <Setter Property="UseLayoutRounding" Value="True" />
+        </Style>
+
+        <Style x:Key="DetailPill" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource SubtleSurfaceBrush}" />
+            <Setter Property="CornerRadius" Value="{DynamicResource RadiusSm}" />
+            <Setter Property="Padding" Value="13,7" />
+            <Setter Property="Margin" Value="0,0,8,0" />
+            <Setter Property="MinWidth" Value="70" />
+            <Setter Property="MinHeight" Value="42" />
+            <Setter Property="TextElement.Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="UseLayoutRounding" Value="True" />
+        </Style>
+
+        <Style x:Key="DetailLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="8.5" />
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="Foreground" Value="{DynamicResource MutedTextBrush}" />
+            <Setter Property="HorizontalAlignment" Value="Left" />
+        </Style>
+
+        <Style x:Key="DetailValue" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12.5" />
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="Margin" Value="0,1,0,0" />
+            <Setter Property="HorizontalAlignment" Value="Left" />
+        </Style>
+    </Window.Resources>
 
     <Border x:Name="WindowBorder"
             Background="{DynamicResource AppBackgroundBrush}"
             BorderBrush="{DynamicResource BorderBrush}"
             BorderThickness="1"
-            CornerRadius="10"
+            CornerRadius="26"
             ClipToBounds="True">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="24"
-                              ShadowDepth="6"
-                              Direction="270"
-                              Color="#000000"
-                              Opacity="0.15" />
-        </Border.Effect>
-    <Grid>
-        <Grid.RowDefinitions>
-            <RowDefinition Height="36" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-        </Grid.RowDefinitions>
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="48" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
 
-        <Grid x:Name="TitleBar"
-              Grid.Row="0"
-              Background="Transparent"
-              MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
+            <Grid x:Name="TitleBar"
+                  Grid.Row="0"
+                  Background="{DynamicResource SurfaceBrush}"
+                  MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
 
-            <StackPanel Grid.Column="0"
-                        Orientation="Horizontal"
-                        Margin="14,0,0,0"
-                        VerticalAlignment="Center">
-                <Ellipse Width="7" Height="7"
-                         Fill="{DynamicResource AccentBrush}"
-                         Margin="0,0,6,0" />
-                <TextBlock Text="Trust Client"
-                           FontSize="11"
-                           FontWeight="Medium"
-                           Foreground="{DynamicResource MutedTextBrush}" />
-            </StackPanel>
-
-            <Rectangle Grid.Column="1"
-                       Fill="Transparent"
-                       shell:WindowChrome.IsHitTestVisibleInChrome="False" />
-
-            <StackPanel Grid.Column="2"
-                        Orientation="Horizontal"
-                        shell:WindowChrome.IsHitTestVisibleInChrome="True">
-                <Button x:Name="MinimizeButton"
-                        Width="40"
-                        Height="36"
-                        Style="{StaticResource TitleBarButton}"
-                        ToolTip="Свернуть"
-                        Click="MinimizeButton_Click">
-                    <Path Data="M5,12 L19,12"
-                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                          StrokeThickness="1.5"
-                          StrokeStartLineCap="Round"
-                          StrokeEndLineCap="Round" />
-                </Button>
-
-                <Button x:Name="ExpandCollapseButton"
-                        Width="40"
-                        Height="36"
-                        Style="{StaticResource TitleBarButton}"
-                        ToolTip="Свернуть/развернуть панель"
-                        Click="MaxRestoreButton_Click">
-                    <Path x:Name="ExpandCollapsePath"
-                          Data="M5,5 H19 V19 H5 Z"
-                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                          StrokeThickness="1.5"
-                          Fill="Transparent"
-                          Width="12"
-                          Height="12"
-                          Stretch="Uniform" />
-                </Button>
-
-                <Button x:Name="CloseButton"
-                        Width="40"
-                        Height="36"
-                        Style="{StaticResource TitleBarCloseButton}"
-                        ToolTip="Закрыть"
-                        Click="CloseButton_Click">
-                    <Path Data="M6,6 L18,18 M18,6 L6,18"
-                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                          StrokeThickness="1.5"
-                          StrokeStartLineCap="Round"
-                          StrokeEndLineCap="Round"
-                          Width="12"
-                          Height="12" />
-                </Button>
-            </StackPanel>
-        </Grid>
-
-        <DockPanel Grid.Row="1" Margin="20,18,20,16" LastChildFill="False" Panel.ZIndex="2">
-            <StackPanel DockPanel.Dock="Left" VerticalAlignment="Center">
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <TextBlock Text="TrustTunnel" FontSize="28" FontWeight="Bold" />
+                <StackPanel Grid.Column="0"
+                            Orientation="Horizontal"
+                            Margin="12,0,8,0"
+                            VerticalAlignment="Center">
+                    <Image Source="Assets/proxy-open-hub-32.png"
+                           Width="22"
+                           Height="22"
+                           Stretch="Uniform"
+                           SnapsToDevicePixels="True" />
                     <Border x:Name="HeaderStatusDot"
-                            Width="10"
-                            Height="10"
+                            Width="7"
+                            Height="7"
+                            CornerRadius="4"
                             Background="{DynamicResource AccentBrush}"
-                            CornerRadius="5"
-                            Margin="10,4,0,0"
+                            Margin="8,1,0,0"
                             VerticalAlignment="Center"
                             Visibility="Collapsed"
-                            UseLayoutRounding="True"
-                            ToolTip="Статус: Idle" />
+                            ToolTip="Status: Idle" />
                 </StackPanel>
-                <TextBlock Text="Alpha v0.1" Foreground="{DynamicResource MutedTextBrush}" />
-            </StackPanel>
-            <WrapPanel x:Name="NavButtonsPanel"
-                       DockPanel.Dock="Right"
-                       HorizontalAlignment="Right"
-                       VerticalAlignment="Center">
-                <Button Content="Профили маршрутов" Click="RoutingProfilesButton_Click" Style="{StaticResource GhostButton}" MinWidth="150" ToolTip="Открыть профили маршрутизации" />
-                <Button Content="Редактировать TOML" Click="TomlToolsButton_Click" Style="{StaticResource GhostButton}" MinWidth="160" ToolTip="Открыть TOML текущего сервера" />
-                <Button Content="Логи" Click="LogsButton_Click" Style="{StaticResource GhostButton}" MinWidth="86" ToolTip="Открыть окно логов" />
-                <Button Content="Настройки" Click="SettingsButton_Click" Style="{StaticResource GhostButton}" MinWidth="116" ToolTip="Открыть настройки приложения" />
-            </WrapPanel>
-        </DockPanel>
 
-        <Grid Grid.Row="2" Margin="20,0,0,20" Panel.ZIndex="0">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="300" MinWidth="300" MaxWidth="340" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition x:Name="RightColumn" Width="*" MinWidth="0" />
-            </Grid.ColumnDefinitions>
+                <StackPanel x:Name="ExpandedCoreTabsPanel"
+                            Grid.Column="1"
+                            Orientation="Horizontal"
+                            VerticalAlignment="Bottom"
+                            shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                    <Button Style="{StaticResource CoreTabButton}"
+                            ToolTip="TrustTunnel core">
+                        <StackPanel Orientation="Horizontal"
+                                    VerticalAlignment="Center">
+                            <Border Width="20"
+                                    Height="20"
+                                    CornerRadius="6"
+                                    Background="{DynamicResource AccentBrush}"
+                                    VerticalAlignment="Center">
+                                <TextBlock Text="T"
+                                           Foreground="White"
+                                           FontSize="11"
+                                           FontWeight="Bold"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                            </Border>
+                            <TextBlock x:Name="AppTitleText"
+                                       Text="TrustTunnel"
+                                       FontSize="12.5"
+                                       FontWeight="Bold"
+                                       Margin="8,0,8,0"
+                                       VerticalAlignment="Center" />
+                            <Path Data="M6,6 L14,14 M14,6 L6,14"
+                                  Stroke="{DynamicResource MutedTextBrush}"
+                                  StrokeThickness="1.5"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"
+                                  Width="10"
+                                  Height="10"
+                                  Stretch="Uniform"
+                                  VerticalAlignment="Center"
+                                  Opacity="0.55" />
+                        </StackPanel>
+                    </Button>
 
-            <Border Grid.Column="0" Style="{StaticResource Card}" Margin="0,0,0,0">
-                <Grid>
+                    <Button x:Name="CoreAddButton"
+                            Style="{StaticResource CoreAddButton}"
+                            ToolTip="Add core"
+                            Click="CoreAddButton_Click">
+                        <Path Data="M12,5 V19 M5,12 H19"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                              StrokeThickness="1.8"
+                              StrokeStartLineCap="Round"
+                              Width="13"
+                              Height="13"
+                              Stretch="Uniform" />
+                    </Button>
+
+                </StackPanel>
+
+                <StackPanel x:Name="CompactCoreSelectorPanel"
+                            Grid.Column="1"
+                            Orientation="Horizontal"
+                            VerticalAlignment="Center"
+                            Visibility="Collapsed"
+                            shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                    <Button x:Name="CompactCoreSelectorButton"
+                            Style="{StaticResource CompactCoreSelectorButton}"
+                            ToolTip="Open cores"
+                            Click="CoreAddButton_Click">
+                        <StackPanel Orientation="Horizontal"
+                                    VerticalAlignment="Center">
+                            <Border Width="20"
+                                    Height="20"
+                                    CornerRadius="7"
+                                    Background="{DynamicResource AccentBrush}"
+                                    VerticalAlignment="Center">
+                                <TextBlock Text="T"
+                                           Foreground="White"
+                                           FontSize="11"
+                                           FontWeight="Bold"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                            </Border>
+                            <Border Background="{DynamicResource AccentSoftBrush}"
+                                    CornerRadius="8"
+                                    Padding="6,1"
+                                    Margin="6,0,5,0"
+                                    VerticalAlignment="Center">
+                                <TextBlock Text="1"
+                                           FontSize="10"
+                                           FontWeight="Bold"
+                                           Foreground="{DynamicResource AccentBrush}" />
+                            </Border>
+                            <Path Data="M4,7 L8,11 L12,7"
+                                  Stroke="{DynamicResource MutedTextBrush}"
+                                  StrokeThickness="1.6"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"
+                                  Width="10"
+                                  Height="8"
+                                  Stretch="Uniform"
+                                  VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+
+                    <Button x:Name="CompactCoreAddButton"
+                            Style="{StaticResource CoreAddButton}"
+                            ToolTip="Add core"
+                            Visibility="Collapsed"
+                            Click="CoreAddButton_Click">
+                        <Path Data="M12,5 V19 M5,12 H19"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                              StrokeThickness="1.8"
+                              StrokeStartLineCap="Round"
+                              Width="13"
+                              Height="13"
+                              Stretch="Uniform" />
+                    </Button>
+                </StackPanel>
+
+                <Popup x:Name="CorePickerPopup"
+                       PlacementTarget="{Binding ElementName=CoreAddButton}"
+                       Placement="Bottom"
+                       HorizontalOffset="-14"
+                       VerticalOffset="4"
+                       StaysOpen="True"
+                       AllowsTransparency="True"
+                       PopupAnimation="Fade"
+                       Closed="CorePickerPopup_Closed">
+                    <Grid Margin="14">
+                    <Border Background="{DynamicResource SurfaceBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}"
+                            BorderThickness="1"
+                            CornerRadius="{DynamicResource RadiusMd}"
+                            Padding="8"
+                            Width="272">
+                        <Border.Effect>
+                            <DropShadowEffect BlurRadius="26"
+                                              ShadowDepth="8"
+                                              Direction="270"
+                                              Opacity="0.18"
+                                              Color="#000000" />
+                        </Border.Effect>
+                        <StackPanel>
+                            <TextBlock Text="{local:Loc Main.OpenCores}"
+                                       FontSize="10"
+                                       FontWeight="Bold"
+                                       Foreground="{DynamicResource MutedTextBrush}"
+                                       Margin="8,4,8,8" />
+                            <ScrollViewer MaxHeight="292"
+                                          HorizontalScrollBarVisibility="Disabled"
+                                          VerticalScrollBarVisibility="Auto">
+                                <StackPanel>
+                            <Button Style="{StaticResource CoreMenuItemButton}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Width="26" Height="26" CornerRadius="8" Background="{DynamicResource AccentBrush}">
+                                        <TextBlock Text="T" Foreground="White" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Margin="11,0,0,0">
+                                        <TextBlock Text="TrustTunnel" FontWeight="Bold" />
+                                        <TextBlock Text="{local:Loc Main.ActiveCore}" FontSize="11" Foreground="{DynamicResource MutedTextBrush}" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="2" Text="{local:Loc Main.Open}" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource AccentBrush}" VerticalAlignment="Center" />
+                                </Grid>
+                            </Button>
+                            <Button Style="{StaticResource CoreMenuItemButton}" IsEnabled="False">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Width="26" Height="26" CornerRadius="8" Background="#C97425">
+                                        <TextBlock Text="S" Foreground="White" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Margin="11,0,0,0">
+                                        <TextBlock Text="sing-box" FontWeight="Bold" />
+                                        <TextBlock Text="{local:Loc Main.TrustedRelease}" FontSize="11" Foreground="{DynamicResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="2" Text="{local:Loc Main.Soon}" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" />
+                                </Grid>
+                            </Button>
+                            <Button Style="{StaticResource CoreMenuItemButton}" IsEnabled="False">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Width="26" Height="26" CornerRadius="8" Background="#2563EB">
+                                        <TextBlock Text="N" Foreground="White" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Margin="11,0,0,0">
+                                        <TextBlock Text="NaiveProxy" FontWeight="Bold" />
+                                        <TextBlock Text="{local:Loc Main.TrustedRelease}" FontSize="11" Foreground="{DynamicResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="2" Text="{local:Loc Main.Soon}" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" />
+                                </Grid>
+                            </Button>
+                            <Button Style="{StaticResource CoreMenuItemButton}" IsEnabled="False">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Width="26" Height="26" CornerRadius="8" Background="#7C3AED">
+                                        <TextBlock Text="X" Foreground="White" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Margin="11,0,0,0">
+                                        <TextBlock Text="Xray-core" FontWeight="Bold" />
+                                        <TextBlock Text="{local:Loc Main.TrustedRelease}" FontSize="11" Foreground="{DynamicResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="2" Text="{local:Loc Main.Soon}" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" />
+                                </Grid>
+                            </Button>
+                            <Button Style="{StaticResource CoreMenuItemButton}" IsEnabled="False">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Width="26" Height="26" CornerRadius="8" Background="#C6445A">
+                                        <TextBlock Text="H" Foreground="White" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Margin="11,0,0,0">
+                                        <TextBlock Text="Hysteria2" FontWeight="Bold" />
+                                        <TextBlock Text="{local:Loc Main.TrustedRelease}" FontSize="11" Foreground="{DynamicResource MutedTextBrush}" TextTrimming="CharacterEllipsis" />
+                                    </StackPanel>
+                                    <TextBlock Grid.Column="2" Text="{local:Loc Main.Soon}" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" />
+                                </Grid>
+                            </Button>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </StackPanel>
+                    </Border>
+                    </Grid>
+                </Popup>
+
+                <StackPanel x:Name="NavButtonsPanel"
+                            Grid.Column="1"
+                            Orientation="Horizontal"
+                            Width="0"
+                            Visibility="Collapsed"
+                            shell:WindowChrome.IsHitTestVisibleInChrome="True" />
+
+                <StackPanel Grid.Column="3"
+                            Orientation="Horizontal"
+                            Margin="0,0,8,0"
+                            VerticalAlignment="Center"
+                            shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                    <Button x:Name="CollapseButton"
+                            Style="{StaticResource ChromeButton}"
+                            ToolTip="{local:Loc Settings.Compact}"
+                            Click="CollapseButton_Click">
+                        <Path x:Name="ExpandCollapsePath"
+                              Data="M5,9 H15 V19 H5 Z M9,5 H19 V15"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                              StrokeThickness="1.7"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round"
+                              StrokeLineJoin="Round"
+                              Width="13"
+                              Height="13"
+                              Stretch="Uniform"
+                              Fill="Transparent"
+                              RenderTransformOrigin="0.5,0.5">
+                            <Path.RenderTransform>
+                                <RotateTransform x:Name="CollapseArrowRotation" Angle="0" />
+                            </Path.RenderTransform>
+                        </Path>
+                    </Button>
+
+                    <Button x:Name="MinimizeButton"
+                            Style="{StaticResource ChromeButton}"
+                            ToolTip="Hide window"
+                            Click="MinimizeButton_Click">
+                        <Path Data="M5,12 L19,12"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                              StrokeThickness="1.7"
+                              StrokeStartLineCap="Round"
+                              Width="13"
+                              Height="13"
+                              Stretch="Uniform" />
+                    </Button>
+
+                    <Button x:Name="CloseButton"
+                            Style="{StaticResource ChromeCloseButton}"
+                            ToolTip="Close"
+                            Click="CloseButton_Click">
+                        <Path Data="M6,6 L18,18 M18,6 L6,18"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                              StrokeThickness="1.7"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round"
+                              Width="12"
+                              Height="12"
+                              Stretch="Uniform" />
+                    </Button>
+                </StackPanel>
+            </Grid>
+
+            <Grid Grid.Row="1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition x:Name="SidebarColumn" Width="316" />
+                    <ColumnDefinition x:Name="RightColumn" Width="*" MinWidth="0" />
+                </Grid.ColumnDefinitions>
+
+                <Border Grid.Column="0"
+                        Background="{DynamicResource SurfaceBrush}"
+                        BorderBrush="{DynamicResource BorderBrush}"
+                        BorderThickness="0,1,1,0">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <Grid Grid.Row="0" Margin="18,16,18,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{local:Loc Main.Servers}"
+                                       FontSize="11"
+                                       FontWeight="Bold"
+                                       Foreground="{DynamicResource MutedTextBrush}"
+                                       VerticalAlignment="Center" />
+                            <Border Grid.Column="2"
+                                    CornerRadius="10"
+                                    Background="{DynamicResource SubtleSurfaceBrush}"
+                                    Padding="8,2"
+                                    MinWidth="24"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Center">
+                                <TextBlock x:Name="ProfileCountText"
+                                           Text="0"
+                                           FontSize="11"
+                                           FontWeight="Bold"
+                                           Foreground="{DynamicResource MutedTextBrush}"
+                                           HorizontalAlignment="Center" />
+                            </Border>
+                        </Grid>
+
+                        <ListBox x:Name="ProfilesList"
+                                 Grid.Row="1"
+                                 Margin="12,0,12,0"
+                                 Background="Transparent"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                 SelectionChanged="ProfilesList_SelectionChanged"
+                                 PreviewMouseRightButtonDown="ProfilesList_PreviewMouseRightButtonDown">
+                            <ListBox.ContextMenu>
+                                <ContextMenu Opened="ProfilesContextMenu_Opened">
+                                    <MenuItem x:Name="ContextEditServerMenuItem" Header="{local:Loc Main.ServerParameters}" Click="ContextEditServer_Click" />
+                                    <MenuItem x:Name="ContextPingServerMenuItem" Header="{local:Loc Settings.Diagnostics}" Click="ContextPingServer_Click" />
+                                    <MenuItem x:Name="ContextDuplicateServerMenuItem" Header="{local:Loc Common.Duplicate}" Click="ContextDuplicateServer_Click" />
+                                    <MenuItem x:Name="ContextDeleteServerMenuItem" Header="{local:Loc Common.Delete}" Click="ContextDeleteServer_Click" />
+                                    <Separator x:Name="ContextAddSeparator" />
+                                    <MenuItem x:Name="ContextImportClipboardMenuItem" Header="{local:Loc Import.FromClipboard}" Click="ContextImportClipboard_Click" />
+                                    <MenuItem x:Name="ContextImportTomlMenuItem" Header="{local:Loc ImportToml.Title}" Click="ContextImportToml_Click" />
+                                </ContextMenu>
+                            </ListBox.ContextMenu>
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem" BasedOn="{StaticResource ServerListItem}" />
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid MinHeight="50">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" MinWidth="0" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <Border Grid.Column="0"
+                                                Width="38"
+                                                Height="28"
+                                                CornerRadius="7"
+                                                Margin="0,0,12,0"
+                                                VerticalAlignment="Center">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Background" Value="{DynamicResource SubtleSurfaceBrush}" />
+                                                    <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}" />
+                                                    <Setter Property="BorderThickness" Value="1" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                                                            <Setter Property="Background" Value="{DynamicResource AccentBrush}" />
+                                                            <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <TextBlock Text="{Binding CountryCode, Converter={StaticResource CountryCodeTextConverter}}"
+                                                       FontSize="11"
+                                                       FontWeight="Bold"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="{DynamicResource MutedTextBrush}" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                                                                <Setter Property="Foreground" Value="White" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </Border>
+
+                                        <StackPanel Grid.Column="1"
+                                                    MinWidth="0"
+                                                    VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding DisplayName}"
+                                                       FontSize="13.5"
+                                                       FontWeight="Bold"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       TextWrapping="NoWrap" />
+                                            <TextBlock Text="{Binding Endpoint.Hostname}"
+                                                       FontSize="11.5"
+                                                       Foreground="{DynamicResource MutedTextBrush}"
+                                                       Margin="0,2,0,0"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       TextWrapping="NoWrap" />
+                                        </StackPanel>
+
+                                        <StackPanel Grid.Column="2"
+                                                    Orientation="Vertical"
+                                                    VerticalAlignment="Center"
+                                                    HorizontalAlignment="Right"
+                                                    Margin="8,0,0,0">
+                                            <StackPanel Orientation="Horizontal"
+                                                        HorizontalAlignment="Right"
+                                                        Visibility="{Binding HasTestResult, Converter={StaticResource BoolToVisibilityConverter}}">
+                                                <Ellipse Width="7"
+                                                         Height="7"
+                                                         Fill="{Binding TestResult.PingMs, Converter={StaticResource PingToBrushConverter}}"
+                                                         Margin="0,0,5,0"
+                                                         VerticalAlignment="Center" />
+                                                <TextBlock Text="{Binding TestResult.PingMs, StringFormat={}{0} ms}"
+                                                           FontSize="12"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="{Binding TestResult.PingMs, Converter={StaticResource PingToBrushConverter}}" />
+                                            </StackPanel>
+                                            <Border Width="46"
+                                                    Height="4"
+                                                    CornerRadius="4"
+                                                    Background="{DynamicResource BorderBrush}"
+                                                    Margin="0,7,0,0"
+                                                    HorizontalAlignment="Right">
+                                                <Border Width="22"
+                                                        Height="4"
+                                                        CornerRadius="4"
+                                                        Background="{DynamicResource MutedTextBrush}"
+                                                        HorizontalAlignment="Left" />
+                                            </Border>
+                                        </StackPanel>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+
+                        <StackPanel Grid.Row="2" Margin="12">
+                            <Button x:Name="SidebarImportButton"
+                                    Click="ImportButton_Click"
+                                    Style="{StaticResource GhostButton}"
+                                    HorizontalAlignment="Stretch"
+                                    Background="Transparent"
+                                    BorderBrush="{DynamicResource BorderBrush}"
+                                    Foreground="{DynamicResource MutedTextBrush}"
+                                    Margin="0,0,0,10"
+                                    ToolTip="{local:Loc Main.AddServer}">
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                    <TextBlock Text="+"
+                                               FontWeight="Bold"
+                                               Margin="0,0,8,0" />
+                                    <TextBlock Text="{local:Loc Main.AddServer}" />
+                                </StackPanel>
+                            </Button>
+
+                            <StackPanel x:Name="CompactDockPanel"
+                                        Visibility="Collapsed"
+                                        Margin="0,0,0,8">
+                                <Border Style="{StaticResource QuietPanel}"
+                                        Padding="11,9"
+                                        Margin="0,0,0,6">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <Border Width="38"
+                                                Height="28"
+                                                CornerRadius="7"
+                                                Background="{DynamicResource SubtleSurfaceBrush}"
+                                                BorderBrush="{DynamicResource BorderBrush}"
+                                                BorderThickness="1"
+                                                Margin="0,0,11,0">
+                                            <TextBlock x:Name="CompactCountryText"
+                                                       Text="TT"
+                                                       FontSize="11"
+                                                       FontWeight="Bold"
+                                                       Foreground="{DynamicResource MutedTextBrush}"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center" />
+                                        </Border>
+
+                                        <StackPanel Grid.Column="1"
+                                                    MinWidth="0"
+                                                    VerticalAlignment="Center">
+                                            <TextBlock x:Name="CompactServerText"
+                                                       Text="{local:Loc Main.NoServer}"
+                                                       FontSize="13.5"
+                                                       FontWeight="Bold"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       TextWrapping="NoWrap" />
+                                            <TextBlock x:Name="CompactModeText"
+                                                       Text="{local:Loc Main.ImportConfig}"
+                                                       FontSize="11"
+                                                       Foreground="{DynamicResource MutedTextBrush}"
+                                                       Margin="0,2,0,0"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       TextWrapping="NoWrap" />
+                                        </StackPanel>
+
+                                        <StackPanel Grid.Column="2"
+                                                    Orientation="Horizontal"
+                                                    VerticalAlignment="Center"
+                                                    Margin="10,0,0,0">
+                                            <Ellipse Width="7"
+                                                     Height="7"
+                                                     Fill="{DynamicResource AccentBrush}"
+                                                     Margin="0,0,5,0"
+                                                     VerticalAlignment="Center" />
+                                            <TextBlock x:Name="CompactPingText"
+                                                       Text="-"
+                                                       FontSize="12"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource MutedTextBrush}" />
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+
+                                <Grid Margin="0,0,0,10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <StackPanel Orientation="Horizontal"
+                                                VerticalAlignment="Center">
+                                        <Border x:Name="CompactStatusDot"
+                                                Width="8"
+                                                Height="8"
+                                                CornerRadius="4"
+                                                Background="{DynamicResource MutedTextBrush}"
+                                                Margin="0,1,8,0" />
+                                        <TextBlock x:Name="CompactStatusText"
+                                                   Text="{local:Loc Main.Disconnected}"
+                                                   FontSize="18"
+                                                   FontWeight="Bold"
+                                                   TextTrimming="CharacterEllipsis" />
+                                    </StackPanel>
+                                </Grid>
+                            </StackPanel>
+
+                            <Border x:Name="DiagnosticsPanel"
+                                    Visibility="Collapsed"
+                                    Background="{DynamicResource SubtleSurfaceBrush}"
+                                    BorderBrush="{DynamicResource BorderBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="14"
+                                    Padding="10"
+                                    Margin="0,0,0,10">
+                                <StackPanel>
+                                    <TextBlock x:Name="DiagnosticsSummaryText"
+                                               FontWeight="Bold"
+                                               FontSize="12" />
+                                    <ItemsControl x:Name="DiagnosticsResultsList" Margin="0,6,0,0">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <StackPanel Margin="0,0,0,6">
+                                                    <TextBlock FontSize="11.5" FontWeight="SemiBold">
+                                                        <Run Text="{Binding Name}" />
+                                                        <Run Text=" - " />
+                                                        <Run Text="{Binding Status}" />
+                                                    </TextBlock>
+                                                    <TextBlock Text="{Binding Message}"
+                                                               Foreground="{DynamicResource MutedTextBrush}"
+                                                               FontSize="11"
+                                                               TextWrapping="Wrap" />
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </Border>
+
+                            <Button x:Name="SidebarConnectButton"
+                                    Content="{local:Loc Main.Connect}"
+                                    Click="SidebarConnectButton_Click"
+                                    Style="{StaticResource PrimaryConnectButton}"
+                                    HorizontalAlignment="Stretch"
+                                    Margin="0,0,0,8"
+                                    Visibility="Collapsed"
+                                    ToolTip="{local:Loc Main.Connect}"
+                                    RenderTransformOrigin="0.5,0.5">
+                                <Button.RenderTransform>
+                                    <ScaleTransform ScaleX="1" ScaleY="1" />
+                                </Button.RenderTransform>
+                            </Button>
+
+                            <UniformGrid x:Name="SidebarToolsPanel"
+                                         Columns="5"
+                                         Rows="1"
+                                         HorizontalAlignment="Stretch"
+                                         Margin="0,6,0,0">
+                                <Button x:Name="ThemeToggleButton"
+                                        Style="{StaticResource IconButton}"
+                                        ToolTip="{local:Loc Main.ToggleTheme}"
+                                        Click="ThemeToggleButton_Click">
+                                    <Grid x:Name="ThemeIconHost"
+                                          Width="22"
+                                          Height="22"
+                                          RenderTransformOrigin="0.5,0.5">
+                                        <Grid.RenderTransform>
+                                            <RotateTransform x:Name="ThemeIconRotate" />
+                                        </Grid.RenderTransform>
+
+                                        <Viewbox x:Name="ThemeMoonIcon"
+                                                 Width="20"
+                                                 Height="20"
+                                                 Opacity="1">
+                                            <Path Data="M21,12.8 A8.5,8.5 0 1 1 11.2,3 A6.5,6.5 0 0 0 21,12.8 Z"
+                                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                  StrokeThickness="1.8"
+                                                  StrokeStartLineCap="Round"
+                                                  StrokeEndLineCap="Round"
+                                                  StrokeLineJoin="Round"
+                                                  Fill="Transparent"
+                                                  Width="24"
+                                                  Height="24"
+                                                  Stretch="Uniform" />
+                                        </Viewbox>
+
+                                        <Viewbox x:Name="ThemeSunIcon"
+                                                 Width="20"
+                                                 Height="20"
+                                                 Opacity="0">
+                                            <Grid Width="24" Height="24">
+                                                <Ellipse Width="7.2"
+                                                         Height="7.2"
+                                                         HorizontalAlignment="Center"
+                                                         VerticalAlignment="Center"
+                                                         Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                         StrokeThickness="1.8"
+                                                         Fill="Transparent" />
+                                                <Path Data="M12,2.2 V4.8 M12,19.2 V21.8 M4.8,12 H2.2 M21.8,12 H19.2 M6.9,6.9 L5.1,5.1 M18.9,18.9 L17.1,17.1 M17.1,6.9 L18.9,5.1 M5.1,18.9 L6.9,17.1"
+                                                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                      StrokeThickness="1.8"
+                                                      StrokeStartLineCap="Round"
+                                                      StrokeEndLineCap="Round"
+                                                      Fill="Transparent" />
+                                            </Grid>
+                                        </Viewbox>
+                                    </Grid>
+                                </Button>
+                                <Button Style="{StaticResource IconButton}" ToolTip="{local:Loc Main.RoutingProfiles}" Click="RoutingProfilesButton_Click">
+                                    <Path Data="M5,5 H19 M5,12 H15 M5,19 H11 M16,12 L19,15 L16,18"
+                                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                          StrokeThickness="1.8"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"
+                                          StrokeLineJoin="Round"
+                                          Fill="Transparent"
+                                          Width="24"
+                                          Height="24"
+                                          Stretch="Uniform" />
+                                </Button>
+                                <Button Style="{StaticResource IconButton}" ToolTip="{local:Loc Main.EditToml}" Click="TomlToolsButton_Click">
+                                    <Path Data="M7,3 H15 L20,8 V21 H7 Z M15,3 V8 H20 M11,13 L9,15 L11,17 M16,13 L18,15 L16,17"
+                                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                          StrokeThickness="1.7"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"
+                                          StrokeLineJoin="Round"
+                                          Fill="Transparent"
+                                          Width="24"
+                                          Height="24"
+                                          Stretch="Uniform" />
+                                </Button>
+                                <Button Style="{StaticResource IconButton}" ToolTip="{local:Loc Main.Logs}" Click="LogsButton_Click">
+                                    <Path Data="M7,4 H17 L20,7 V20 H7 Z M17,4 V8 H20 M10,11 H17 M10,15 H17 M10,19 H14"
+                                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                          StrokeThickness="1.7"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"
+                                          StrokeLineJoin="Round"
+                                          Fill="Transparent"
+                                          Width="24"
+                                          Height="24"
+                                          Stretch="Uniform" />
+                                </Button>
+                                <Button Style="{StaticResource IconButton}" ToolTip="{local:Loc Main.Settings}" Click="SettingsButton_Click">
+                                    <Path Data="M4,7 H10 M14,7 H20 M12,5 V9 M4,12 H14 M18,12 H20 M16,10 V14 M4,17 H8 M12,17 H20 M10,15 V19"
+                                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                          StrokeThickness="1.8"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"
+                                          StrokeLineJoin="Round"
+                                          Fill="Transparent"
+                                          Width="24"
+                                          Height="24"
+                                          Stretch="Uniform" />
+                                </Button>
+                            </UniformGrid>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <Grid x:Name="RightPanelContainer"
+                      Grid.Column="1"
+                      Margin="26,18,26,22">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                         <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
-                    <StackPanel Grid.Row="0">
-                        <TextBlock Text="Серверы" FontSize="18" FontWeight="SemiBold" />
-                        <TextBlock Text="Выберите профиль или добавьте новый." Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap" Margin="0,4,0,12" />
-                    </StackPanel>
+                    <Border Grid.Row="0"
+                            Style="{StaticResource QuietPanel}"
+                            Padding="12,10">
+                        <Border.Effect>
+                            <DropShadowEffect BlurRadius="14"
+                                              ShadowDepth="2"
+                                              Direction="270"
+                                              Opacity="0.18"
+                                              Color="{DynamicResource ElevationColor}" />
+                        </Border.Effect>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" MinWidth="0" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
 
-                    <ListBox x:Name="ProfilesList"
-                             Grid.Row="1"
-                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                             ScrollViewer.VerticalScrollBarVisibility="Auto"
-                             SelectionChanged="ProfilesList_SelectionChanged"
-                             PreviewMouseRightButtonDown="ProfilesList_PreviewMouseRightButtonDown">
-                        <ListBox.ContextMenu>
-                            <ContextMenu Opened="ProfilesContextMenu_Opened">
-                                <MenuItem x:Name="ContextEditServerMenuItem" Header="Изменить" Click="ContextEditServer_Click" />
-                                <MenuItem x:Name="ContextPingServerMenuItem" Header="Проверить соединение" Click="ContextPingServer_Click" />
-                                <MenuItem x:Name="ContextDuplicateServerMenuItem" Header="Дублировать" Click="ContextDuplicateServer_Click" />
-                                <MenuItem x:Name="ContextDeleteServerMenuItem" Header="Удалить" Click="ContextDeleteServer_Click" />
-                                <Separator x:Name="ContextAddSeparator" />
-                                <MenuItem x:Name="ContextImportClipboardMenuItem" Header="Добавить из буфера обмена" Click="ContextImportClipboard_Click" />
-                                <MenuItem x:Name="ContextImportTomlMenuItem" Header="Добавить TOML" Click="ContextImportToml_Click" />
-                            </ContextMenu>
-                        </ListBox.ContextMenu>
-                        <ListBox.ItemContainerStyle>
-                            <Style TargetType="ListBoxItem" BasedOn="{StaticResource ServerListItem}" />
-                        </ListBox.ItemContainerStyle>
-                        <ListBox.ItemTemplate>
-                            <DataTemplate>
-                                <Grid VerticalAlignment="Stretch" ClipToBounds="True">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" MinWidth="0" />
-                                        <ColumnDefinition Width="Auto" MaxWidth="72" />
-                                    </Grid.ColumnDefinitions>
-                                    <Grid Grid.Column="0" VerticalAlignment="Center">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="Auto" />
-                                            <ColumnDefinition Width="*" />
-                                        </Grid.ColumnDefinitions>
-                                        <Ellipse Grid.Column="0" Width="9" Height="9" Fill="{DynamicResource AccentBrush}" Margin="0,3,8,0" VerticalAlignment="Top" />
-                                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                            <TextBlock Text="{Binding DisplayName}"
-                                                       FontWeight="SemiBold"
-                                                       FontSize="14"
-                                                       TextTrimming="CharacterEllipsis"
-                                                       TextWrapping="NoWrap" />
-                                            <TextBlock Foreground="{DynamicResource MutedTextBrush}"
-                                                       FontSize="12"
-                                                       Margin="0,2,0,0"
-                                                       TextTrimming="CharacterEllipsis"
-                                                       TextWrapping="NoWrap">
-                                                <Run Text="{Binding Endpoint.UpstreamProtocol}" />
-                                                <Run Text=" · " />
-                                                <Run Text="{Binding Listener.Mode}" />
-                                                <Run Text=" · " />
-                                                <Run Text="{Binding Endpoint.Hostname}" />
-                                            </TextBlock>
-                                            <Border Margin="0,4,0,0"
-                                                    Background="{DynamicResource SubtleSurfaceBrush}"
-                                                    CornerRadius="6"
-                                                    Padding="6,3"
-                                                    HorizontalAlignment="Left"
-                                                    MaxWidth="176"
-                                                    UseLayoutRounding="True"
-                                                    Visibility="{Binding HasTestResult, Converter={StaticResource BoolToVisibilityConverter}}">
-                                                <StackPanel Orientation="Horizontal">
-                                                    <TextBlock Text="{Binding TestResult.CountryCode, Converter={StaticResource CountryFlagConverter}}" FontSize="12" VerticalAlignment="Center" />
-                                                    <TextBlock Text="{Binding TestResult.PingMs, StringFormat={}{0} ms}"
-                                                               Foreground="{Binding TestResult.PingMs, Converter={StaticResource PingToBrushConverter}}"
-                                                               FontSize="11"
-                                                               FontWeight="SemiBold"
-                                                               Margin="5,0,0,0"
-                                                               VerticalAlignment="Center" />
-                                                    <TextBlock Text=" · " Foreground="{DynamicResource MutedTextBrush}" FontSize="11" VerticalAlignment="Center" />
-                                                    <TextBlock FontSize="11" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis">
-                                                        <Run Text="↓" />
-                                                        <Run Text="{Binding TestResult.DownloadMbps, Converter={StaticResource MbpsTextConverter}}" Foreground="{DynamicResource TextBrush}" />
-                                                        <Run Text=" ↑" />
-                                                        <Run Text="{Binding TestResult.UploadMbps, Converter={StaticResource MbpsTextConverter}}" Foreground="{DynamicResource TextBrush}" />
-                                                        <Run Text=" Mbps" />
-                                                    </TextBlock>
-                                                </StackPanel>
-                                            </Border>
-                                        </StackPanel>
-                                    </Grid>
-                                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                                        <Button
-                                                Click="ServerCardTestButton_Click"
-                                                Style="{StaticResource IconButton}"
-                                                ToolTip="Запустить тест скорости">
-                                            <Path Data="M6,4 L18,12 L6,20 Z" Fill="{DynamicResource TextBrush}" Stretch="Uniform" Width="12" Height="12" />
-                                        </Button>
-                                        <Button
-                                                Click="ServerCardRetestButton_Click"
-                                                Style="{StaticResource IconButton}"
-                                                ToolTip="Повторить тест"
-                                                Visibility="{Binding HasTestResult, Converter={StaticResource BoolToVisibilityConverter}}">
-                                            <Path Data="M17,1 L21,5 L17,9 M3,11 A9,9 0 0 1 18,5 M7,23 L3,19 L7,15 M21,13 A9,9 0 0 1 6,19" Stroke="{DynamicResource TextBrush}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Fill="Transparent" Stretch="Uniform" Width="14" Height="14" />
-                                        </Button>
-                                    </StackPanel>
-                                </Grid>
-                            </DataTemplate>
-                        </ListBox.ItemTemplate>
-                    </ListBox>
+                            <Border Width="34"
+                                    Height="28"
+                                    CornerRadius="8"
+                                    Background="{DynamicResource SubtleSurfaceBrush}"
+                                    BorderBrush="{DynamicResource BorderBrush}"
+                                    BorderThickness="1"
+                                    Margin="0,0,12,0">
+                                <TextBlock x:Name="SelectedCountryText"
+                                           Text="TT"
+                                           FontSize="10.5"
+                                           FontWeight="Bold"
+                                           Foreground="{DynamicResource MutedTextBrush}"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                            </Border>
 
-                    <Border x:Name="DiagnosticsPanel"
-                            Grid.Row="2"
-                            Visibility="Collapsed"
-                            Background="{DynamicResource SubtleSurfaceBrush}"
-                            BorderBrush="{DynamicResource BorderBrush}"
-                            BorderThickness="1"
-                            CornerRadius="8"
-                            Padding="10"
-                            Margin="0,10,0,0">
-                        <StackPanel>
-                            <TextBlock x:Name="DiagnosticsSummaryText" FontWeight="SemiBold" />
-                            <ItemsControl x:Name="DiagnosticsResultsList" Margin="0,6,0,0">
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <StackPanel Margin="0,0,0,6">
-                                            <TextBlock FontWeight="SemiBold">
-                                                <Run Text="{Binding Name}" />
-                                                <Run Text=" · " />
-                                                <Run Text="{Binding Status}" />
-                                            </TextBlock>
-                                            <TextBlock Text="{Binding Message}" Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap" />
-                                        </StackPanel>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
-                        </StackPanel>
+                            <StackPanel Grid.Column="1" MinWidth="0">
+                                <TextBlock x:Name="SelectedServerText"
+                                           Text="{local:Loc Main.NoServer}"
+                                           FontSize="14"
+                                           FontWeight="Bold"
+                                           TextTrimming="CharacterEllipsis"
+                                           TextWrapping="NoWrap" />
+                                <TextBlock x:Name="ModeText"
+                                           Text="{local:Loc Main.ImportConfig}"
+                                           FontSize="11.5"
+                                           Foreground="{DynamicResource MutedTextBrush}"
+                                           Margin="0,2,0,0"
+                                           TextTrimming="CharacterEllipsis"
+                                           TextWrapping="NoWrap" />
+                            </StackPanel>
+
+                            <Button Grid.Column="2"
+                                    Style="{StaticResource IconButton}"
+                                    ToolTip="{local:Loc Main.ServerParameters}"
+                                    Margin="12,0,0,0"
+                                    Click="ServerOptionsButton_Click">
+                                <Path Data="M10,4 A6,6 0 1 0 10,16 A6,6 0 1 0 10,4 M10,9 V13 M10,6.8 V7"
+                                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                      StrokeThickness="1.5"
+                                      StrokeStartLineCap="Round"
+                                      Fill="Transparent" />
+                            </Button>
+                        </Grid>
                     </Border>
 
-                    <StackPanel Grid.Row="3" Margin="12,8,12,12">
-                        <Button x:Name="SidebarConnectButton"
-                                Content="Подключиться"
-                                Click="SidebarConnectButton_Click"
-                                HorizontalAlignment="Stretch"
-                                Margin="0,0,0,6"
-                                Visibility="Collapsed"
-                                ToolTip="Подключиться к выбранному серверу"
-                                RenderTransformOrigin="0.5,0.5">
-                            <Button.RenderTransform>
-                                <ScaleTransform ScaleX="1" ScaleY="1" />
-                            </Button.RenderTransform>
-                        </Button>
-                        <Button Click="ImportButton_Click"
-                                HorizontalAlignment="Stretch"
-                                Margin="0"
-                                ToolTip="Добавить сервер">
-                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                                <TextBlock Text="+" FontWeight="Bold" Margin="0,0,8,0" />
-                                <TextBlock Text="Добавить сервер" />
-                            </StackPanel>
-                        </Button>
-                    </StackPanel>
-                </Grid>
-            </Border>
-
-            <Button x:Name="CollapseButton"
-                    Grid.Column="1"
-                    Panel.ZIndex="99"
-                    shell:WindowChrome.IsHitTestVisibleInChrome="True"
-                    Style="{StaticResource CollapseButtonStyle}"
-                    ToolTip="Скрыть/Показать детали"
-                    Click="CollapseButton_Click">
-                <Path Data="M6,4 L10,8 L6,12"
-                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                      StrokeThickness="1.5"
-                      StrokeStartLineCap="Round"
-                      StrokeEndLineCap="Round"
-                      StrokeLineJoin="Round"
-                      Stretch="Uniform"
-                      Width="12"
-                      Height="12"
-                      Fill="Transparent"
-                      RenderTransformOrigin="0.5,0.5">
-                    <Path.RenderTransform>
-                        <RotateTransform x:Name="CollapseArrowRotation" Angle="0" />
-                    </Path.RenderTransform>
-                </Path>
-            </Button>
-
-            <Grid x:Name="RightPanelContainer" Grid.Column="2" Margin="16,0,20,0">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="*" />
-                </Grid.RowDefinitions>
-
-                <Border Grid.Row="0" Style="{StaticResource Card}" Margin="0,0,0,14">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="180" />
-                        </Grid.ColumnDefinitions>
-
-                        <StackPanel Grid.Column="0">
-                            <Border x:Name="ServerStatusIndicator"
-                                    Width="52"
-                                    Height="52"
-                                    CornerRadius="26"
-                                    Background="{DynamicResource AccentSoftBrush}"
-                                    HorizontalAlignment="Left"
-                                    Margin="0,0,0,12"
-                                    Style="{StaticResource StatusIndicator}"
-                                    UseLayoutRounding="True">
-                                <Grid>
-                                    <Ellipse Width="18" Height="18" Fill="{DynamicResource AccentBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <Grid Grid.Row="1">
+                        <StackPanel HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Margin="0,-4,0,10">
+                            <Button x:Name="ConnectButton"
+                                    Style="{StaticResource RingButtonStyle}"
+                                    Background="Transparent"
+                                    Click="ConnectionActionButton_Click"
+                                    ToolTip="{local:Loc Main.Connect}">
+                                <Grid Width="204" Height="204" Background="Transparent">
+                                    <Ellipse Width="192"
+                                             Height="192"
+                                             StrokeThickness="6"
+                                             Stroke="{DynamicResource RingTrackBrush}"
+                                             HorizontalAlignment="Center"
+                                             VerticalAlignment="Center" />
+                                    <Ellipse x:Name="RingProgress"
+                                             Width="192"
+                                             Height="192"
+                                             StrokeThickness="6"
+                                             Stroke="{DynamicResource AccentBrush}"
+                                             StrokeStartLineCap="Round"
+                                             StrokeEndLineCap="Round"
+                                             StrokeDashArray="0 100.53"
+                                             HorizontalAlignment="Center"
+                                             VerticalAlignment="Center"
+                                             RenderTransformOrigin="0.5,0.5">
+                                        <Ellipse.RenderTransform>
+                                            <TransformGroup>
+                                                <RotateTransform Angle="-90" />
+                                                <RotateTransform x:Name="RingSpin" Angle="0" />
+                                            </TransformGroup>
+                                        </Ellipse.RenderTransform>
+                                    </Ellipse>
+                                    <Ellipse x:Name="RingTopDot"
+                                             Width="8"
+                                             Height="8"
+                                             Fill="{DynamicResource AccentBrush}"
+                                             HorizontalAlignment="Center"
+                                             VerticalAlignment="Top"
+                                             Margin="0,4,0,0"
+                                             Opacity="1" />
+                                    <Grid x:Name="RingDiscHost"
+                                          Width="122"
+                                          Height="122"
+                                          HorizontalAlignment="Center"
+                                          VerticalAlignment="Center"
+                                          RenderTransformOrigin="0.5,0.5">
+                                        <Border x:Name="RingDisc"
+                                                CornerRadius="61"
+                                                Background="{DynamicResource RingDiscBrush}"
+                                                BorderBrush="{DynamicResource BorderBrush}"
+                                                BorderThickness="1" />
+                                        <Border x:Name="RingAccentDisc"
+                                                CornerRadius="61"
+                                                Background="{DynamicResource AccentBrush}"
+                                                BorderBrush="{DynamicResource AccentBrush}"
+                                                BorderThickness="1"
+                                                Opacity="0">
+                                            <Border.Effect>
+                                                <DropShadowEffect x:Name="RingGlow"
+                                                                  BlurRadius="22"
+                                                                  ShadowDepth="0"
+                                                                  Opacity="0"
+                                                                  Color="{DynamicResource AccentGlowColor}" />
+                                            </Border.Effect>
+                                        </Border>
+                                        <StackPanel HorizontalAlignment="Center"
+                                                    VerticalAlignment="Center">
+                                            <Path x:Name="RingGlyph"
+                                                  Width="30"
+                                                  Height="30"
+                                                  Stretch="Uniform"
+                                                  Stroke="{DynamicResource MutedTextBrush}"
+                                                  StrokeThickness="1.8"
+                                                  StrokeStartLineCap="Round"
+                                                  StrokeEndLineCap="Round"
+                                                  StrokeLineJoin="Round"
+                                                  Data="M12,3 L12,11 M7.05,7.05 C4.32,9.78 4.32,14.22 7.05,16.95 C9.78,19.68 14.22,19.68 16.95,16.95 C19.68,14.22 19.68,9.78 16.95,7.05"
+                                                  HorizontalAlignment="Center" />
+                                            <TextBlock x:Name="RingCaption"
+                                                       Text="{local:Loc Main.Connect}"
+                                                       Margin="0,8,0,0"
+                                                       FontSize="10.5"
+                                                       FontWeight="Bold"
+                                                       Foreground="{DynamicResource MutedTextBrush}"
+                                                       HorizontalAlignment="Center" />
+                                        </StackPanel>
+                                    </Grid>
                                 </Grid>
-                            </Border>
-                            <TextBlock x:Name="SelectedServerText" Text="Сервер не выбран" FontSize="24" FontWeight="SemiBold" />
-                            <TextBlock x:Name="StatusText" Text="Статус: Idle" Foreground="{DynamicResource MutedTextBrush}" Margin="0,7,0,0" TextWrapping="Wrap" />
-                            <TextBlock x:Name="ModeText" Text="TUN · HTTP/2 · Kill switch on" Foreground="{DynamicResource MutedTextBrush}" Margin="0,4,0,0" TextWrapping="Wrap" />
-                            <WrapPanel Margin="0,14,0,0">
-                                <Border Style="{StaticResource Pill}">
-                                    <TextBlock x:Name="TransportPillText" Text="HTTP/2" />
-                                </Border>
-                                <Border Style="{StaticResource Pill}">
-                                    <TextBlock x:Name="ListenerPillText" Text="TUN" />
-                                </Border>
-                                <Border Style="{StaticResource Pill}">
-                                    <TextBlock x:Name="DnsPillText" Text="DNS default" />
-                                </Border>
-                            </WrapPanel>
-                        </StackPanel>
+                            </Button>
 
-                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                            <Button x:Name="ConnectButton" Content="Подключиться" Click="ConnectionActionButton_Click" Height="58" FontSize="16" MinWidth="160" />
-                            <Button Content="Параметры" Click="ServerOptionsButton_Click" Style="{StaticResource GhostButton}" MinWidth="160" />
+                            <StackPanel Orientation="Horizontal"
+                                        HorizontalAlignment="Center"
+                                        Margin="0,8,0,0">
+                                <Border x:Name="ServerStatusIndicator"
+                                        Width="7"
+                                        Height="7"
+                                        CornerRadius="4"
+                                        Background="{DynamicResource MutedTextBrush}"
+                                        Margin="0,7,8,0"
+                                        Style="{StaticResource StatusIndicator}" />
+                                <StackPanel>
+                                    <TextBlock x:Name="StatusText"
+                                               Text="{local:Loc Main.Disconnected}"
+                                               FontSize="17"
+                                               FontWeight="Bold" />
+                                    <TextBlock x:Name="RingHintText"
+                                               Text="{local:Loc Main.SelectServerAndConnect}"
+                                               FontSize="11.5"
+                                               Foreground="{DynamicResource MutedTextBrush}"
+                                               Margin="0,2,0,0" />
+                                </StackPanel>
+                            </StackPanel>
+
+                            <TextBlock x:Name="RingActionText"
+                                       Text="{local:Loc Main.Connect}"
+                                       Visibility="Collapsed" />
+
+                            <StackPanel Orientation="Horizontal"
+                                        HorizontalAlignment="Center"
+                                        Margin="0,14,0,0">
+                                <Border Style="{StaticResource MetricPanel}">
+                                    <StackPanel>
+                                        <TextBlock Text="{local:Loc Main.Download}"
+                                                   FontSize="9"
+                                                   FontWeight="Bold"
+                                                   Foreground="{DynamicResource MutedTextBrush}" />
+                                        <TextBlock x:Name="DownloadMetricText"
+                                                   Text="0.0"
+                                                   FontSize="19"
+                                                   FontWeight="Bold"
+                                                   Foreground="{DynamicResource MutedTextBrush}" />
+                                        <TextBlock Text="Mbps"
+                                                   FontSize="9"
+                                                   Foreground="{DynamicResource MutedTextBrush}" />
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Style="{StaticResource MetricPanel}">
+                                    <StackPanel>
+                                        <TextBlock Text="{local:Loc Main.Upload}"
+                                                   FontSize="9"
+                                                   FontWeight="Bold"
+                                                   Foreground="{DynamicResource MutedTextBrush}" />
+                                        <TextBlock x:Name="UploadMetricText"
+                                                   Text="0.0"
+                                                   FontSize="19"
+                                                   FontWeight="Bold"
+                                                   Foreground="{DynamicResource MutedTextBrush}" />
+                                        <TextBlock Text="Mbps"
+                                                   FontSize="9"
+                                                   Foreground="{DynamicResource MutedTextBrush}" />
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
                         </StackPanel>
                     </Grid>
-                </Border>
 
-                <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,0,0,14">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="220" />
-                        </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0">
-                            <TextBlock Text="Профиль маршрутизации" FontSize="16" FontWeight="SemiBold" />
-                            <TextBlock Text="Выбирается отдельно от сервера, как в обычных VPN-клиентах." Foreground="{DynamicResource MutedTextBrush}" Margin="0,4,0,0" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <ComboBox x:Name="RoutingProfileComboBox" Grid.Column="1" VerticalAlignment="Center" SelectionChanged="RoutingProfileComboBox_SelectionChanged" />
-                    </Grid>
-                </Border>
+                    <Border Grid.Row="2"
+                            BorderBrush="{DynamicResource BorderBrush}"
+                            BorderThickness="0,1,0,0"
+                            Padding="0,12,0,0">
+                        <Grid MinHeight="44"
+                              VerticalAlignment="Center">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" MinWidth="16" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <StackPanel Grid.Column="0"
+                                        Orientation="Horizontal"
+                                        VerticalAlignment="Center"
+                                        HorizontalAlignment="Left">
+                                <Border Style="{StaticResource DetailPill}">
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="{local:Loc Main.Protocol}" Style="{StaticResource DetailLabel}" />
+                                        <TextBlock x:Name="TransportPillText"
+                                                   Text="-"
+                                                   Style="{StaticResource DetailValue}" />
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Style="{StaticResource DetailPill}">
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="{local:Loc Main.Ping}" Style="{StaticResource DetailLabel}" />
+                                        <TextBlock x:Name="ListenerPillText"
+                                                   Text="-"
+                                                   Style="{StaticResource DetailValue}" />
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Style="{StaticResource DetailPill}">
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="{local:Loc Main.Session}" Style="{StaticResource DetailLabel}" />
+                                        <TextBlock x:Name="DnsPillText"
+                                                   Text="-"
+                                                   Style="{StaticResource DetailValue}" />
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+
+                            <Grid Grid.Column="2"
+                                  Height="42"
+                                  VerticalAlignment="Center"
+                                  HorizontalAlignment="Right">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{local:Loc Main.Route}"
+                                           Grid.Column="0"
+                                           FontSize="10.5"
+                                           FontWeight="Bold"
+                                           Foreground="{DynamicResource MutedTextBrush}"
+                                           VerticalAlignment="Center"
+                                           Margin="0,0,10,0" />
+                                <ComboBox x:Name="RoutingProfileComboBox"
+                                          Grid.Column="1"
+                                          Width="150"
+                                          Height="34"
+                                          Padding="10,5"
+                                          Margin="0"
+                                          VerticalAlignment="Center"
+                                          VerticalContentAlignment="Center"
+                                          Foreground="{DynamicResource TextBrush}"
+                                          SelectionChanged="RoutingProfileComboBox_SelectionChanged" />
+                            </Grid>
+                        </Grid>
+                    </Border>
+                </Grid>
             </Grid>
         </Grid>
-    </Grid>
     </Border>
 </Window>

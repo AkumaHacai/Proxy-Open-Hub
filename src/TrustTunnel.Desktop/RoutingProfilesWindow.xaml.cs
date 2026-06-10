@@ -7,11 +7,26 @@ namespace TrustTunnel.Desktop;
 
 public partial class RoutingProfilesWindow : Window
 {
+    private static readonly string[] LocalNetworkRules =
+    [
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16"
+    ];
+
+    private static readonly string[] RuBypassRules =
+    [
+        "*.ru",
+        "*.su",
+        "*.xn--p1ai"
+    ];
+
     private readonly ObservableCollection<RoutingProfile> _profiles;
 
     public RoutingProfilesWindow(IEnumerable<RoutingProfile> profiles)
     {
         InitializeComponent();
+        DialogChrome.Apply(this);
         _profiles = new ObservableCollection<RoutingProfile>(profiles);
         ProfilesList.ItemsSource = _profiles;
         if (_profiles.Count > 0)
@@ -43,7 +58,7 @@ public partial class RoutingProfilesWindow : Window
         {
             Id = Guid.NewGuid().ToString("n"),
             Name = "Custom profile",
-            Description = "Новый профиль"
+            Description = LocalizationManager.Instance.Translate("Routing.Title")
         };
         _profiles.Add(profile);
         ProfilesList.SelectedItem = profile;
@@ -57,11 +72,32 @@ public partial class RoutingProfilesWindow : Window
             Name = "Local bypass",
             Mode = RoutingMode.General,
             KillSwitchEnabled = true,
-            Exclusions = new[] { "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16" },
-            Description = "VPN, кроме локальных сетей"
+            Exclusions = LocalNetworkRules,
+            Description = LocalizationManager.Instance.Translate("Routing.LocalBypass")
         };
         _profiles.Add(profile);
         ProfilesList.SelectedItem = profile;
+    }
+
+    private void RuBypassPresetButton_Click(object sender, RoutedEventArgs e)
+    {
+        ModeComboBox.SelectedIndex = 0;
+        AppendRules(RuBypassRules);
+        DescriptionTextBox.Text = UiParsing.EmptyTo(DescriptionTextBox.Text.Trim(), LocalizationManager.Instance.Translate("Routing.RuBypass"));
+    }
+
+    private void LocalBypassPresetButton_Click(object sender, RoutedEventArgs e)
+    {
+        ModeComboBox.SelectedIndex = 0;
+        AppendRules(LocalNetworkRules);
+        DescriptionTextBox.Text = UiParsing.EmptyTo(DescriptionTextBox.Text.Trim(), LocalizationManager.Instance.Translate("Routing.LocalBypass"));
+    }
+
+    private void SelectivePresetButton_Click(object sender, RoutedEventArgs e)
+    {
+        ModeComboBox.SelectedIndex = 1;
+        DescriptionTextBox.Text = UiParsing.EmptyTo(DescriptionTextBox.Text.Trim(), LocalizationManager.Instance.Translate("Routing.SelectivePreset"));
+        ExclusionsTextBox.Focus();
     }
 
     private void DeleteButton_Click(object sender, RoutedEventArgs e)
@@ -84,7 +120,7 @@ public partial class RoutingProfilesWindow : Window
 
         var updated = profile with
         {
-            Name = UiParsing.EmptyTo(NameTextBox.Text.Trim(), "Routing profile"),
+            Name = UiParsing.EmptyTo(NameTextBox.Text.Trim(), LocalizationManager.Instance.Translate("Routing.NewProfile")),
             Description = DescriptionTextBox.Text.Trim(),
             Mode = ModeComboBox.SelectedIndex == 1 ? RoutingMode.Selective : RoutingMode.General,
             KillSwitchEnabled = KillSwitchCheckBox.IsChecked == true,
@@ -94,6 +130,16 @@ public partial class RoutingProfilesWindow : Window
         var index = _profiles.IndexOf(profile);
         _profiles[index] = updated;
         ProfilesList.SelectedItem = updated;
+    }
+
+    private void AppendRules(IEnumerable<string> rules)
+    {
+        var merged = UiParsing.TextList(ExclusionsTextBox.Text)
+            .Concat(rules)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        ExclusionsTextBox.Text = string.Join(Environment.NewLine, merged);
     }
 
     private void DoneButton_Click(object sender, RoutedEventArgs e)

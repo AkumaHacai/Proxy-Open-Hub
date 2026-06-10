@@ -36,7 +36,7 @@ public interface IVpnController
     Task DisconnectAsync(CancellationToken cancellationToken = default);
 }
 
-public sealed class NativeBridgeVpnController : IVpnController
+public sealed class NativeBridgeVpnController : IVpnController, IDisposable
 {
     private const string ServiceName = "TrustTunnelEasyService";
     private const string ServiceDisplayName = "TrustTunnel VPN Service";
@@ -50,7 +50,9 @@ public sealed class NativeBridgeVpnController : IVpnController
     private readonly object _stateLock = new();
     private NativeTrustTunnelRuntime? _runtime;
     private TrustTunnelCliRuntime? _cliRuntime;
+    private CancellationTokenSource? _nativeWatchdogCts;
     private bool _serviceModeActive;
+    private bool _disposed;
     private DateTimeOffset _lastNativeStateAt = DateTimeOffset.MinValue;
     private string _lastCliError = "";
 
@@ -63,6 +65,8 @@ public sealed class NativeBridgeVpnController : IVpnController
 
     public async Task ConnectAsync(ServerProfile profile, CancellationToken cancellationToken = default)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
         if (IsConnectionBusy(CurrentPhase))
         {
             throw new VpnException(VpnErrorCode.NativeStartFailed, "TrustTunnel is already connecting or connected.");
@@ -179,6 +183,11 @@ public sealed class NativeBridgeVpnController : IVpnController
 
     public async Task DisconnectAsync(CancellationToken cancellationToken = default)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         NativeTrustTunnelRuntime? runtime;
         TrustTunnelCliRuntime? cliRuntime;
         bool serviceMode;
@@ -421,6 +430,7 @@ public sealed class NativeBridgeVpnController : IVpnController
         {
             _lastNativeStateAt = DateTimeOffset.UtcNow;
         }
+        CancelNativeWatchdog();
 
         var stateName = Enum.IsDefined(typeof(NativeVpnSessionState), stateValue)
             ? ((NativeVpnSessionState)stateValue).ToString()
@@ -545,21 +555,38 @@ public sealed class NativeBridgeVpnController : IVpnController
 
     private void StartNativeWatchdog(DateTimeOffset startRequestedAt, string serverName)
     {
-        _ = Task.Run(async () =>
+        CancelNativeWatchdog();
+        var watchdogCts = new CancellationTokenSource();
+        lock (_stateLock)
         {
-            await Task.Delay(NativeStartTimeout);
-            DateTimeOffset lastStateAt;
-            lock (_stateLock)
-            {
-                lastStateAt = _lastNativeStateAt;
-            }
+            _nativeWatchdogCts = watchdogCts;
+        }
 
-            if (lastStateAt < startRequestedAt && CurrentPhase == ConnectionPhase.Connecting)
-            {
-                TryTransitionTo(ConnectionPhase.Error, "Native adapter did not report a state within 30 seconds.", serverName);
-                _log.Error("Native adapter did not report a state within 30 seconds.");
-            }
-        });
+        _ = WatchNativeStartAsync(startRequestedAt, serverName, watchdogCts.Token);
+    }
+
+    private async Task WatchNativeStartAsync(DateTimeOffset startRequestedAt, string serverName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(NativeStartTimeout, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        DateTimeOffset lastStateAt;
+        lock (_stateLock)
+        {
+            lastStateAt = _lastNativeStateAt;
+        }
+
+        if (lastStateAt < startRequestedAt && CurrentPhase == ConnectionPhase.Connecting)
+        {
+            TryTransitionTo(ConnectionPhase.Error, "Native adapter did not report a state within 30 seconds.", serverName);
+            _log.Error("Native adapter did not report a state within 30 seconds.");
+        }
     }
 
     private ConnectionPhase CurrentPhase
@@ -596,13 +623,20 @@ public sealed class NativeBridgeVpnController : IVpnController
 
     private void ClearNativeRuntime(NativeTrustTunnelRuntime runtime)
     {
+        var cleared = false;
         lock (_stateLock)
         {
             if (ReferenceEquals(_runtime, runtime))
             {
                 _runtime = null;
                 _serviceModeActive = false;
+                cleared = true;
             }
+        }
+
+        if (cleared)
+        {
+            CancelNativeWatchdog();
         }
     }
 
@@ -640,5 +674,81 @@ public sealed class NativeBridgeVpnController : IVpnController
 
         using var identity = WindowsIdentity.GetCurrent();
         return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        CancelNativeWatchdog();
+
+        NativeTrustTunnelRuntime? runtime;
+        TrustTunnelCliRuntime? cliRuntime;
+        bool serviceMode;
+        lock (_stateLock)
+        {
+            runtime = _runtime;
+            cliRuntime = _cliRuntime;
+            serviceMode = _serviceModeActive;
+            _runtime = null;
+            _cliRuntime = null;
+            _serviceModeActive = false;
+        }
+
+        try
+        {
+            cliRuntime?.Dispose();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            _log.Error($"TrustTunnel CLI dispose failed: {ex.Message}");
+        }
+
+        if (runtime is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (serviceMode)
+            {
+                _ = runtime.StopService(ServiceName, ServicePipeName);
+            }
+            else
+            {
+                runtime.StopDirect();
+            }
+        }
+        catch (Exception ex) when (ex is VpnException or InvalidOperationException)
+        {
+            _log.Error($"TrustTunnel native dispose failed: {ex.Message}");
+        }
+        finally
+        {
+            runtime.Dispose();
+        }
+    }
+
+    private void CancelNativeWatchdog()
+    {
+        CancellationTokenSource? watchdogCts;
+        lock (_stateLock)
+        {
+            watchdogCts = _nativeWatchdogCts;
+            _nativeWatchdogCts = null;
+        }
+
+        if (watchdogCts is null)
+        {
+            return;
+        }
+
+        watchdogCts.Cancel();
+        watchdogCts.Dispose();
     }
 }

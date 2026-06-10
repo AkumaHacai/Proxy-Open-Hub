@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="260" viewBox="0 0 900 260">
+  <defs><linearGradient id="bg2" x1="20" y1="20" x2="240" y2="240" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#2F9C63"></stop><stop offset="1" stop-color="#1A6E45"></stop></linearGradient></defs>
+  <g transform="translate(20,20)">
+    <rect width="220" height="220" rx="49" fill="url(#bg2)"></rect>
+    <g transform="translate(146,146) scale(0.4297) translate(-256,-256)">
+  <g stroke="#FFFFFF" stroke-width="24" stroke-linecap="round" fill="none">
+    <line x1="256" y1="203" x2="256" y2="118"></line>
+    <line x1="216.2" y1="291" x2="146" y2="352"></line>
+    <line x1="295.8" y1="291" x2="366" y2="352"></line>
+  </g>
+  <circle cx="256" cy="110" r="34" fill="#FFFFFF"></circle>
+  <circle cx="138" cy="360" r="34" fill="#FFFFFF"></circle>
+  <circle cx="374" cy="360" r="34" fill="#FFFFFF"></circle>
+  <circle cx="256" cy="256" r="40" fill="none" stroke="#FFFFFF" stroke-width="26"></circle></g>
+  </g>
+  <text x="282" y="118" font-family="&#39;Inter Tight&#39;,system-ui,sans-serif" font-size="58" font-weight="500" fill="#F0F3EF" letter-spacing="-1">Proxy</text>
+  <text x="282" y="186" font-family="&#39;Inter Tight&#39;,system-ui,sans-serif" font-size="58" font-weight="700" fill="#F0F3EF" letter-spacing="-1">Open <tspan fill="#1F7A4D">Hub</tspan></text>
+</svg>

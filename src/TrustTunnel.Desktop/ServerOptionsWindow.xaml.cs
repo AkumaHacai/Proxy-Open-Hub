@@ -11,16 +11,24 @@ public partial class ServerOptionsWindow : Window
 {
     private readonly ServerProfile _source;
     private readonly ISecretStore _secretStore;
+    private readonly AppSettings _settings;
 
-    public ServerOptionsWindow(ServerProfile profile, ISecretStore secretStore, ObservableCollection<RoutingProfile> routingProfiles)
+    public ServerOptionsWindow(ServerProfile profile, ISecretStore secretStore, ObservableCollection<RoutingProfile> routingProfiles, AppSettings settings)
     {
         InitializeComponent();
+        DialogChrome.Apply(this);
         _source = profile;
         _secretStore = secretStore;
+        _settings = settings;
         RoutingProfileComboBox.DisplayMemberPath = nameof(RoutingProfile.Name);
         RoutingProfileComboBox.ItemsSource = routingProfiles;
         LoadProfile(profile, routingProfiles);
         _ = LoadSecretsAsync(profile);
+        Loaded += (_, _) =>
+        {
+            ConnectionNavButton.IsChecked = true;
+            ShowSection(ConnectionSection);
+        };
     }
 
     private async Task LoadSecretsAsync(ServerProfile profile)
@@ -39,8 +47,44 @@ public partial class ServerOptionsWindow : Window
 
     public ServerProfile? ResultProfile { get; private set; }
 
+    private void SectionNav_Checked(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded || sender is not RadioButton { Tag: string section })
+        {
+            return;
+        }
+
+        var target = section switch
+        {
+            "Switches" => SwitchesSection,
+            "Routing" => RoutingSection,
+            "Local" => LocalSection,
+            "Advanced" => AdvancedSection,
+            _ => ConnectionSection
+        };
+
+        ShowSection(target);
+    }
+
+    private void ShowSection(Border target)
+    {
+        ConnectionSection.Visibility = Visibility.Collapsed;
+        SwitchesSection.Visibility = Visibility.Collapsed;
+        RoutingSection.Visibility = Visibility.Collapsed;
+        LocalSection.Visibility = Visibility.Collapsed;
+        AdvancedSection.Visibility = Visibility.Collapsed;
+
+        target.Visibility = Visibility.Visible;
+        OptionsScrollViewer.ScrollToTop();
+    }
+
     private void LoadProfile(ServerProfile profile, ObservableCollection<RoutingProfile> routingProfiles)
     {
+        var profileName = UiParsing.EmptyTo(profile.DisplayName.Trim(), profile.Endpoint.Hostname.Trim());
+        Title = $"{LocalizationManager.Instance.Translate("Profile.WindowTitle")} - {profileName}";
+        TitleText.Text = LocalizationManager.Instance.Format("Profile.Title", profileName);
+        ProfileBadgeText.Text = UiParsing.EmptyTo(profile.Endpoint.Hostname.Trim(), profileName);
+
         NameTextBox.Text = profile.DisplayName;
         HostnameTextBox.Text = profile.Endpoint.Hostname;
         CustomSniTextBox.Text = profile.Endpoint.CustomSni;
@@ -78,11 +122,7 @@ public partial class ServerOptionsWindow : Window
 
         BoundIfTextBox.Text = profile.Listener.Tun.BoundIf;
         DeviceNameTextBox.Text = profile.Listener.Tun.DeviceName;
-        SocksAddressTextBox.Text = profile.Listener.Socks.Address;
-        SocksAllowLanCheckBox.IsChecked = profile.Listener.Socks.AllowLanAccess;
         SocksUsernameTextBox.Text = profile.Listener.Socks.Username;
-        HttpProxyAddressTextBox.Text = profile.Listener.Socks.HttpProxyAddress;
-        HttpProxyAllowLanCheckBox.IsChecked = profile.Listener.Socks.HttpProxyAllowLanAccess;
         CertificatePemTextBox.Text = profile.Endpoint.CertificatePem;
     }
 
@@ -120,6 +160,18 @@ public partial class ServerOptionsWindow : Window
         if (!string.IsNullOrWhiteSpace(socksPassword))
         {
             socksPasswordRef = await _secretStore.SaveAsync(scope, "socks_password", socksPassword);
+        }
+
+        var listenerMode = ListenerComboBox.SelectedIndex == 1 ? ListenerMode.Socks : ListenerMode.Tun;
+        var socksUsername = SocksUsernameTextBox.Text.Trim();
+        if (listenerMode == ListenerMode.Socks && string.IsNullOrWhiteSpace(socksUsername))
+        {
+            socksUsername = SocksCredentialGenerator.Username();
+        }
+
+        if (listenerMode == ListenerMode.Socks && string.IsNullOrWhiteSpace(socksPasswordRef))
+        {
+            socksPasswordRef = await _secretStore.SaveAsync(scope, "socks_password", SocksCredentialGenerator.Password());
         }
 
         var selectedRouting = RoutingProfileComboBox.SelectedItem as RoutingProfile;
@@ -162,7 +214,7 @@ public partial class ServerOptionsWindow : Window
             },
             Listener = _source.Listener with
             {
-                Mode = ListenerComboBox.SelectedIndex == 1 ? ListenerMode.Socks : ListenerMode.Tun,
+                Mode = listenerMode,
                 Tun = _source.Listener.Tun with
                 {
                     BoundIf = BoundIfTextBox.Text.Trim(),
@@ -177,12 +229,12 @@ public partial class ServerOptionsWindow : Window
                 },
                 Socks = _source.Listener.Socks with
                 {
-                    Address = UiParsing.EmptyTo(SocksAddressTextBox.Text.Trim(), "127.0.0.1:1080"),
-                    Username = SocksUsernameTextBox.Text.Trim(),
+                    Address = _settings.DefaultSocksAddress,
+                    Username = socksUsername,
                     PasswordSecretRef = socksPasswordRef,
-                    AllowLanAccess = SocksAllowLanCheckBox.IsChecked == true,
-                    HttpProxyAddress = HttpProxyAddressTextBox.Text.Trim(),
-                    HttpProxyAllowLanAccess = HttpProxyAllowLanCheckBox.IsChecked == true
+                    AllowLanAccess = _settings.DefaultSocksAllowLan,
+                    HttpProxyAddress = "",
+                    HttpProxyAllowLanAccess = false
                 }
             }
         };
@@ -194,10 +246,10 @@ public partial class ServerOptionsWindow : Window
         {
             var confirmed = AppDialog.Confirm(
                 this,
-                "Опасная настройка",
-                "Проверка сертификата отключена. Это снижает безопасность подключения. Сохранить?",
-                "Сохранить",
-                "Отмена",
+                LocalizationManager.Instance.Translate("Profile.UnsafeTitle"),
+                LocalizationManager.Instance.Translate("Profile.UnsafeMessage"),
+                LocalizationManager.Instance.Translate("Common.Save"),
+                LocalizationManager.Instance.Translate("Common.Cancel"),
                 AppDialogTone.Warning);
             if (!confirmed)
             {
@@ -207,12 +259,12 @@ public partial class ServerOptionsWindow : Window
 
         var report = TrustTunnelValidators.Validate(profile, skipVerificationConfirmed: true);
         StatusText.Text = report.Issues.Count == 0
-            ? "Профиль валиден."
+            ? LocalizationManager.Instance.Translate("Profile.Valid")
             : string.Join(Environment.NewLine, report.Issues.Select(issue => $"{issue.Code}: {issue.Message}"));
 
         if (!report.IsValid && closing)
         {
-            AppDialog.Show(this, "Профиль не сохранён", StatusText.Text, AppDialogTone.Warning);
+            AppDialog.Show(this, LocalizationManager.Instance.Translate("Profile.NotSavedTitle"), StatusText.Text, AppDialogTone.Warning);
         }
 
         return report.IsValid;

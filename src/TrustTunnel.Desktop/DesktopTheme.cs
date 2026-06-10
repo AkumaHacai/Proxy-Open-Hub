@@ -51,6 +51,7 @@ public static class DesktopTheme
         resources["AccentBrush"] = new SolidColorBrush(accent);
         resources["AccentHoverBrush"] = new SolidColorBrush(Darken(accent));
         resources["AccentSoftBrush"] = new SolidColorBrush(Color.FromArgb(dark ? (byte)54 : (byte)32, accent.R, accent.G, accent.B));
+        resources["AccentBorderBrush"] = new SolidColorBrush(Color.FromArgb((byte)90, accent.R, accent.G, accent.B));
         resources["AccentTextBrush"] = Brushes.White;
         resources["ControlHoverBrush"] = Brush(dark ? "#2E332F" : "#E7E9E5");
         resources["InputBackgroundBrush"] = Brush(dark ? "#111412" : "#FBFCFA");
@@ -59,6 +60,24 @@ public static class DesktopTheme
         resources["DangerBrush"] = Brush("#B94444");
         resources["DangerHoverBrush"] = Brush("#963636");
         resources["DangerSoftBrush"] = Brush(dark ? "#3A2424" : "#F4E2E2");
+
+        resources["RingTrackBrush"] = Brush(dark ? "#3A403B" : "#E3E6E0");
+        resources["RingDiscBrush"] = Brush(dark ? "#1E211F" : "#FFFFFF");
+        resources["ElevationColor"] = dark ? Color.FromArgb(170, 0, 0, 0) : Color.FromArgb(38, 17, 21, 19);
+        resources["AccentGlowColor"] = Color.FromArgb(dark ? (byte)150 : (byte)96, accent.R, accent.G, accent.B);
+        resources["AccentBrushColor"] = accent;
+        resources["PingGoodBrush"] = Brush(dark ? "#5FC093" : "#2F7D59");
+        resources["PingWarnBrush"] = Brush(dark ? "#D9BD6A" : "#9B7E2D");
+        resources["PingBadBrush"] = Brush(dark ? "#DD8A72" : "#A8543C");
+        resources["ScrollbarTrackBrush"] = Brush(dark ? "#232824" : "#EEF1ED");
+        resources["ScrollbarThumbBrush"] = Brush(dark ? "#566059" : "#C6D0C8");
+        resources["ScrollbarThumbHoverBrush"] = Brush(dark ? "#748077" : "#9DAAA1");
+        resources["RadiusSm"] = new CornerRadius(10);
+        resources["RadiusMd"] = new CornerRadius(14);
+        resources["RadiusLg"] = new CornerRadius(20);
+        resources["RadiusXl"] = new CornerRadius(26);
+        resources["RadiusPill"] = new CornerRadius(999);
+
         resources["ControlPadding"] = settings.Density == DensityMode.Compact ? new Thickness(10, 6, 10, 6) : new Thickness(12, 8, 12, 8);
         resources["FieldMargin"] = settings.Density == DensityMode.Compact ? new Thickness(0, 3, 0, 7) : new Thickness(0, 4, 0, 10);
     }

@@ -13,6 +13,7 @@ public partial class ImportProfileWindow : Window
     public ImportProfileWindow(TrustTunnelAppService appService, ISecretStore secretStore)
     {
         InitializeComponent();
+        DialogChrome.Apply(this);
         _appService = appService;
         _secretStore = secretStore;
         InspectClipboard();
@@ -22,7 +23,8 @@ public partial class ImportProfileWindow : Window
 
     private async void ClipboardImportButton_Click(object sender, RoutedEventArgs e)
     {
-        await ImportAsync(() => _appService.ImportDeeplinkAsync(Clipboard.GetText()));
+        var text = Clipboard.ContainsText() ? Clipboard.GetText() : "";
+        await ImportAsync(() => _appService.ImportDeeplinkAsync(text));
     }
 
     private async void PasteLinkButton_Click(object sender, RoutedEventArgs e)
@@ -73,10 +75,11 @@ public partial class ImportProfileWindow : Window
 
     private void InspectClipboard()
     {
-        var hasLink = Clipboard.ContainsText() && Clipboard.GetText().TrimStart().StartsWith("tt://", StringComparison.OrdinalIgnoreCase);
+        var clipboardText = Clipboard.ContainsText() ? Clipboard.GetText() : "";
+        var hasLink = clipboardText.TrimStart().StartsWith("tt://", StringComparison.OrdinalIgnoreCase);
         ClipboardStatusText.Text = hasLink
-            ? "В буфере обмена найдена TrustTunnel-ссылка."
-            : "TrustTunnel-ссылка в буфере не найдена. Можно вставить вручную или импортировать TOML.";
+            ? LocalizationManager.Instance.Translate("Import.ClipboardFound")
+            : LocalizationManager.Instance.Translate("Import.ClipboardMissing");
         ClipboardImportButton.IsEnabled = hasLink;
     }
 }

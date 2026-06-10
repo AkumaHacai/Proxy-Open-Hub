@@ -72,6 +72,9 @@ dkms.conf
 x64/
 x86/
 
+# Local UI verification screenshots
+artifacts/
+
 # Upgrade Log files
 Backup/
 UpgradeLog*.XML

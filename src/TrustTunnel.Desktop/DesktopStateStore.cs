@@ -21,19 +21,25 @@ public sealed class DesktopStateStore
 
     public string FilePath { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "TrustTunnel",
+        AppBrand.StateDirectoryName,
+        "desktop-state.json");
+
+    private string LegacyFilePath { get; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        AppBrand.LegacyStateDirectoryName,
         "desktop-state.json");
 
     public PersistedDesktopState Load()
     {
         try
         {
-            if (!File.Exists(FilePath))
+            var path = File.Exists(FilePath) ? FilePath : LegacyFilePath;
+            if (!File.Exists(path))
             {
                 return new PersistedDesktopState();
             }
 
-            var json = File.ReadAllText(FilePath);
+            var json = File.ReadAllText(path);
             return JsonSerializer.Deserialize<PersistedDesktopState>(json, JsonOptions) ?? new PersistedDesktopState();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)

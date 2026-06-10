@@ -17,6 +17,10 @@ public sealed record ServerDiagnosticResult(
 public static class ServerDiagnostics
 {
     private const int UnknownPing = -1;
+    private static readonly HttpClient SharedHttpClient = new()
+    {
+        Timeout = Timeout.InfiniteTimeSpan
+    };
 
     public static async Task<IReadOnlyList<ServerDiagnosticResult>> RunAsync(ServerProfile profile, AppSettings settings, CancellationToken cancellationToken = default)
     {
@@ -82,8 +86,7 @@ public static class ServerDiagnostics
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(settings.DiagnosticsTimeout);
-            using var client = new HttpClient { Timeout = settings.DiagnosticsTimeout };
-            using var response = await client.GetAsync(settings.HttpsTestUrl, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+            using var response = await SharedHttpClient.GetAsync(settings.HttpsTestUrl, HttpCompletionOption.ResponseHeadersRead, cts.Token);
             if (!response.IsSuccessStatusCode)
             {
                 return 0;
@@ -171,8 +174,7 @@ public static class ServerDiagnostics
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(settings.DiagnosticsTimeout);
-            using var client = new HttpClient { Timeout = settings.DiagnosticsTimeout };
-            using var response = await client.GetAsync(settings.HttpsTestUrl, cts.Token);
+            using var response = await SharedHttpClient.GetAsync(settings.HttpsTestUrl, cts.Token);
             stopwatch.Stop();
             return new ServerDiagnosticResult("HTTPS", response.IsSuccessStatusCode, $"{settings.HttpsTestUrl}: {(int)response.StatusCode} {response.ReasonPhrase}", stopwatch.Elapsed);
         }

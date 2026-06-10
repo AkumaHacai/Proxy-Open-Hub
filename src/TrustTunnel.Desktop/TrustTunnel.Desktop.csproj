@@ -16,8 +16,22 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
+    <ImplicitUsings>disable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>ProxyOpenHub</AssemblyName>
+    <RootNamespace>TrustTunnel.Desktop</RootNamespace>
+    <ApplicationIcon>Assets\proxy-open-hub.ico</ApplicationIcon>
+    <Product>Proxy Open Hub</Product>
+    <Description>Multi-core proxy and VPN desktop client built around TrustTunnel.</Description>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\proxy-open-hub-32.png" />
+    <Resource Include="Assets\proxy-open-hub-64.png" />
+    <Content Include="Assets\proxy-open-hub.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
 
 </Project>
