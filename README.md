@@ -1,6 +1,6 @@
 # Proxy Open Hub
 
-![Proxy Open Hub logo](logo/proxy-open-hub-horizontal.svg)
+![Proxy Open Hub logo](logo/png/POH.png)
 
 Proxy Open Hub is a Windows desktop proxy/VPN hub built with WPF and .NET. The current working core is the official TrustTunnel Windows core, and the UI is being prepared for optional cores such as sing-box, NaiveProxy, Xray-core, and Hysteria2.
 
