@@ -150,6 +150,32 @@ class BackendImportResult {
   final List<BackendValidationWarning> warnings;
 }
 
+class BackendImportPreview {
+  const BackendImportPreview({
+    required this.profileName,
+    required this.coreId,
+    required this.secretsDetected,
+    required this.warnings,
+  });
+
+  factory BackendImportPreview.fromJson(Map<String, dynamic> json) {
+    return BackendImportPreview(
+      profileName: json['profile_name']?.toString() ?? '',
+      coreId: json['core_id']?.toString() ?? '',
+      secretsDetected: (json['secrets_detected'] as num?)?.toInt() ?? 0,
+      warnings: (json['warnings'] as List? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(BackendValidationWarning.fromJson)
+          .toList(growable: false),
+    );
+  }
+
+  final String profileName;
+  final String coreId;
+  final int secretsDetected;
+  final List<BackendValidationWarning> warnings;
+}
+
 class BackendValidationWarning {
   const BackendValidationWarning({
     required this.field,
@@ -248,6 +274,19 @@ class BackendSessionService {
     );
 
     return BackendImportResult.fromJson(decoded);
+  }
+
+  Future<BackendImportPreview> previewTrustTunnelProfile(String input) async {
+    if (input.trim().isEmpty) {
+      throw const BackendSessionException('Import text is empty');
+    }
+
+    final decoded = await _runBackendCommandWithStdin(
+      ['desktop-preview-profile', '-'],
+      input,
+    );
+
+    return BackendImportPreview.fromJson(decoded);
   }
 
   Future<Map<String, dynamic>> _runSessionCommand(

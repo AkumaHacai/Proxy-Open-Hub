@@ -21,9 +21,12 @@ Implemented guardrails:
 - Installed core manifests are checked against trusted sources, allowed asset patterns, executable paths, and SHA-256 digests. This is the first barrier against fake or swapped core binaries.
 - Bundled TrustTunnel is launched only from the fixed app-local `native/bundled/win-x64` path and is checked against pinned SHA-256 digests before every start.
 - Import from Flutter is passed to Rust through stdin, so `tt://` payloads are no longer written to a temporary import file.
+- Imported profile secrets are stored in `ProtectedSecrets` using Windows DPAPI. Legacy plaintext `Secrets` are migrated on load.
+- Runtime `config.toml`, `session.json`, session logs and desktop state files receive restrictive Windows ACLs after creation.
+- Import preview runs before saving; high-risk TLS/LAN warnings require explicit user confirmation.
+- Profiles with disabled TLS verification or custom certificate material get a persistent UI indicator.
 
 MVP limitation:
 
-- `InMemorySecretStore` is safe for not writing secrets to disk, but it is not durable. Replace it with Windows Credential Manager or DPAPI before a real release.
-- Current `desktop-state.json` still stores the MVP `Secrets` map in plaintext. Move it to DPAPI or Windows Credential Manager before a public release.
 - Signature/AuthentiCode validation is not implemented yet. The current Rust policy prepares `SignatureStatus`, but real release downloads must add signature verification or pinned publisher checks before enabling automatic installation.
+- Process lifetime is still managed by one-shot CLI commands. The current implementation verifies PID image name before stop/status, but a future long-lived service should keep a real process handle.

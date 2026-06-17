@@ -95,6 +95,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
         pingMs: 0,
         dns: 'HTTP/2 - TUN',
         load: 0,
+        tlsVerificationDisabled: false,
       );
     }
 
@@ -1803,6 +1804,10 @@ class _ServerCard extends StatelessWidget {
                         fontFamily: 'monospace',
                       ),
                     ),
+                    if (server.tlsVerificationDisabled) ...[
+                      const SizedBox(height: 5),
+                      const _TlsWarningChip(compact: true),
+                    ],
                   ],
                 ),
               ),
@@ -2237,6 +2242,10 @@ class _ServerStrip extends StatelessWidget {
                     fontFamily: 'monospace',
                   ),
                 ),
+                if (server.tlsVerificationDisabled) ...[
+                  const SizedBox(height: 6),
+                  const _TlsWarningChip(),
+                ],
               ],
             ),
           ),
@@ -2285,6 +2294,10 @@ class _DockServerCard extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(color: palette.muted, fontSize: 11.5),
                 ),
+                if (server.tlsVerificationDisabled) ...[
+                  const SizedBox(height: 6),
+                  const _TlsWarningChip(compact: true),
+                ],
               ],
             ),
           ),
@@ -2327,6 +2340,44 @@ class _DetailPill extends StatelessWidget {
               color: palette.text,
               fontSize: 13,
               fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TlsWarningChip extends StatelessWidget {
+  const _TlsWarningChip({this.compact = false});
+
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = PohPalette.of(context);
+    const warning = Color(0xFFE26060);
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 7 : 9,
+        vertical: compact ? 3 : 5,
+      ),
+      decoration: BoxDecoration(
+        color: warning.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: warning.withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.shield_outlined, color: warning, size: compact ? 11 : 13),
+          SizedBox(width: compact ? 4 : 5),
+          Text(
+            'TLS verification off',
+            style: TextStyle(
+              color: palette.text,
+              fontSize: compact ? 9.5 : 11,
+              fontWeight: FontWeight.w800,
             ),
           ),
         ],

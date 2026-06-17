@@ -113,10 +113,9 @@ Flutter ищет `poh_cli.exe` рядом с `proxy_open_hub.exe` или чер�
 1. Rust парсит `tt://` или TOML.
 2. Создает `DesktopProfile`.
 3. Endpoint/listener получают только `PasswordSecretRef` / `ClientRandomSecretRef`.
-4. Реальные значения кладутся в `Secrets`.
-5. Flutter перечитывает state и показывает новый сервер.
-
-Ограничение MVP: `Secrets` сейчас лежит в JSON state. Перед релизом нужно перенести durable secret storage на Windows Credential Manager или DPAPI.
+4. Реальные значения шифруются через Windows DPAPI и кладутся в `ProtectedSecrets`.
+5. Старый plaintext `Secrets` мигрирует в `ProtectedSecrets` при загрузке state.
+6. Flutter перечитывает state и показывает новый сервер.
 
 ## Как дебажить Rust
 
@@ -218,6 +217,8 @@ apps/desktop_flutter/build/windows/x64/runner/Release/poh_cli.exe
 - Live metrics читаются через OS network counters.
 - Настройки приложения сохраняются в `%LOCALAPPDATA%\ProxyOpenHub\app-settings.json`.
 - Trusted-source registry и проверки fake/tampered core artifacts заложены для будущих ядер.
+- Секреты профилей хранятся как DPAPI `ProtectedSecrets`.
+- Import preview показывает TLS/LAN warnings до сохранения и требует подтверждение.
 
 ## Что еще не закончено
 
@@ -225,7 +226,6 @@ apps/desktop_flutter/build/windows/x64/runner/Release/poh_cli.exe
 - Log streaming пока заменен manual refresh.
 - Exact TrustTunnel/Wintun adapter matching для traffic metrics еще приблизительный.
 - Download/update UI для sing-box, NaiveProxy, Xray-core, Hysteria2 еще не включен.
-- Секреты нужно перенести из JSON в Windows Credential Manager/DPAPI.
 - Нужны tray, installer, packaging и подпись сборки.
 
 ## Легит-чек перед продолжением разработки

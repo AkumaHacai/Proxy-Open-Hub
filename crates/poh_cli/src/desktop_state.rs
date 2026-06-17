@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::{engine::general_purpose, Engine as _};
 use poh_core::{
     sha256_hex, CoreAdapter, CoreId, EndpointConfig, ImportInput, ListenerConfig, ListenerMode,
     LogLevel, Profile, ProfileId, Redactor, RoutingMode, RoutingProfile, SocksConfig,
@@ -16,6 +17,13 @@ use poh_core::{
 use poh_core_runner::{MapSecretResolver, MaterializedRuntime, RuntimeMaterializer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::LocalFree;
+#[cfg(windows)]
+use windows_sys::Win32::Security::Cryptography::{
+    CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DesktopSessionPlan {
@@ -65,6 +73,14 @@ pub struct DesktopImportResult {
     pub warnings: Vec<ValidationWarning>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct DesktopImportPreview {
+    pub profile_name: String,
+    pub core_id: String,
+    pub secrets_detected: usize,
+    pub warnings: Vec<ValidationWarning>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct PersistedDesktopSession {
     pub profile_id: String,
@@ -83,6 +99,7 @@ pub struct PersistedDesktopSession {
 const MAX_IMPORT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STATE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PROFILE_ID_SUFFIX: usize = 10_000;
+const DPAPI_SECRET_PREFIX: &str = "dpapi:v1:";
 const BUNDLED_TRUSTTUNNEL_SHA256: &str =
     "d260f372d5d8f051180e829e47f0b2ae65c1aeda63ab0e56fefa7b68349f2ab0";
 const BUNDLED_WINTUN_SHA256: &str =
@@ -93,13 +110,13 @@ pub fn build_desktop_session_plan(
     profile_id: &str,
 ) -> Result<DesktopSessionPlan, DesktopStateError> {
     let state = load_desktop_state(state_path)?;
+    let secrets = state.resolved_secrets()?;
     let profile = state
         .profiles
         .into_iter()
         .find(|profile| profile.id == profile_id)
         .ok_or_else(|| DesktopStateError::ProfileNotFound(profile_id.to_string()))?;
-    let (profile, materialized, redacted_preview) =
-        build_materialized_session(profile, &state.secrets)?;
+    let (profile, materialized, redacted_preview) = build_materialized_session(profile, &secrets)?;
 
     Ok(DesktopSessionPlan {
         profile_id: profile.id.to_string(),
@@ -123,13 +140,14 @@ pub fn start_desktop_session(
     cleanup_orphaned_runtime_dirs()?;
 
     let state = load_desktop_state(state_path)?;
+    let secrets = state.resolved_secrets()?;
     let desktop_profile = state
         .profiles
         .into_iter()
         .find(|profile| profile.id == profile_id)
         .ok_or_else(|| DesktopStateError::ProfileNotFound(profile_id.to_string()))?;
     let (profile, materialized, redacted_preview) =
-        build_materialized_session(desktop_profile, &state.secrets)?;
+        build_materialized_session(desktop_profile, &secrets)?;
     let executable_path = find_trusttunnel_client()?;
     let started_at_unix_ms = now_unix_ms();
     let runtime_dir = runtime_root()?.join(format!(
@@ -139,6 +157,10 @@ pub fn start_desktop_session(
     ));
     let mut runtime_guard = RuntimeDirGuard::new(runtime_dir.clone());
     let written = materialized.write_to(&runtime_dir)?;
+    restrict_runtime_permissions(&runtime_dir)?;
+    for path in &written {
+        restrict_runtime_permissions(path)?;
+    }
     let config_path = written
         .iter()
         .find(|path| {
@@ -149,6 +171,7 @@ pub fn start_desktop_session(
         .ok_or_else(|| DesktopStateError::RuntimeConfigMissing("config.toml".to_string()))?;
     let log_path = runtime_dir.join("trusttunnel.log");
     let stdout = File::create(&log_path)?;
+    restrict_runtime_permissions(&log_path)?;
     let stderr = stdout.try_clone()?;
     let command_args = vec![
         "--config".to_string(),
@@ -296,11 +319,8 @@ pub fn import_desktop_profile(input: &str) -> Result<DesktopImportResult, Deskto
     );
 
     state.profiles.push(desktop_profile);
-    state.secrets.extend(secrets);
-    if let Some(parent) = state_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&state_path, serde_json::to_string_pretty(&state)?)?;
+    state.insert_protected_secrets(secrets)?;
+    save_desktop_state(&state_path, &state)?;
 
     Ok(DesktopImportResult {
         profile_id,
@@ -309,6 +329,22 @@ pub fn import_desktop_profile(input: &str) -> Result<DesktopImportResult, Deskto
         state_path: state_path.display().to_string(),
         secrets_imported,
         warnings,
+    })
+}
+
+pub fn preview_desktop_profile(input: &str) -> Result<DesktopImportPreview, DesktopStateError> {
+    if input.len() > MAX_IMPORT_BYTES {
+        return Err(DesktopStateError::ImportTooLarge(input.len()));
+    }
+
+    let adapter = TrustTunnelAdapter::new();
+    let parsed = adapter.parse_profile(&ImportInput::text(input.to_string()))?;
+
+    Ok(DesktopImportPreview {
+        profile_name: parsed.profile.name,
+        core_id: "trusttunnel".to_string(),
+        secrets_detected: parsed.secrets.len(),
+        warnings: parsed.warnings,
     })
 }
 
@@ -321,7 +357,12 @@ fn load_desktop_state(state_path: &Path) -> Result<DesktopState, DesktopStateErr
     }
 
     let content = fs::read_to_string(state_path)?;
-    Ok(serde_json::from_str(&content)?)
+    let mut state = serde_json::from_str::<DesktopState>(&content)?;
+    if state.migrate_plaintext_secrets()? {
+        save_desktop_state(state_path, &state)?;
+    }
+
+    Ok(state)
 }
 
 fn load_or_default_desktop_state(state_path: &Path) -> Result<DesktopState, DesktopStateError> {
@@ -335,6 +376,15 @@ fn load_or_default_desktop_state(state_path: &Path) -> Result<DesktopState, Desk
     }
 
     Ok(DesktopState::default())
+}
+
+fn save_desktop_state(state_path: &Path, state: &DesktopState) -> Result<(), DesktopStateError> {
+    if let Some(parent) = state_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(state_path, serde_json::to_string_pretty(state)?)?;
+    restrict_runtime_permissions(state_path)?;
+    Ok(())
 }
 
 fn desktop_profile_from_import(
@@ -536,6 +586,8 @@ pub enum DesktopStateError {
     ProfileNotFound(String),
     #[error("secret was not found in desktop state: {0}")]
     SecretNotFound(String),
+    #[error("secret protection failed: {0}")]
+    SecretProtection(String),
     #[error("desktop session is already running with pid {0}")]
     SessionAlreadyRunning(u32),
     #[error("TrustTunnel client executable was not found")]
@@ -677,7 +729,8 @@ fn load_session() -> Result<Option<PersistedDesktopSession>, DesktopStateError> 
 fn save_session(session: &PersistedDesktopSession) -> Result<(), DesktopStateError> {
     let path = session_file()?;
     let json = serde_json::to_string_pretty(session)?;
-    fs::write(path, json)?;
+    fs::write(&path, json)?;
+    restrict_runtime_permissions(&path)?;
     Ok(())
 }
 
@@ -830,7 +883,10 @@ fn redact_session_log(content: &str, session: &PersistedDesktopSession) -> Strin
     else {
         return Redactor::redact(content);
     };
-    let Ok(secrets) = secret_resolver_values(profile, &state.secrets) else {
+    let Ok(secrets) = state
+        .resolved_secrets()
+        .and_then(|secrets| secret_resolver_values(profile, &secrets))
+    else {
         return Redactor::redact(content);
     };
 
@@ -847,6 +903,171 @@ fn cleanup_orphaned_runtime_dirs() -> Result<(), DesktopStateError> {
     }
 
     Ok(())
+}
+
+fn protect_secret(value: &str) -> Result<String, DesktopStateError> {
+    #[cfg(windows)]
+    {
+        let encrypted = dpapi_protect(value.as_bytes())?;
+        return Ok(format!(
+            "{DPAPI_SECRET_PREFIX}{}",
+            general_purpose::STANDARD.encode(encrypted)
+        ));
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(format!(
+            "plain-dev:v1:{}",
+            general_purpose::STANDARD.encode(value.as_bytes())
+        ))
+    }
+}
+
+fn unprotect_secret(value: &str) -> Result<String, DesktopStateError> {
+    #[cfg(windows)]
+    {
+        let Some(encoded) = value.strip_prefix(DPAPI_SECRET_PREFIX) else {
+            return Ok(value.to_string());
+        };
+        let encrypted = general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| DesktopStateError::SecretProtection(error.to_string()))?;
+        let plain = dpapi_unprotect(&encrypted)?;
+        return String::from_utf8(plain)
+            .map_err(|error| DesktopStateError::SecretProtection(error.to_string()));
+    }
+
+    #[cfg(not(windows))]
+    {
+        let Some(encoded) = value.strip_prefix("plain-dev:v1:") else {
+            return Ok(value.to_string());
+        };
+        let plain = general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| DesktopStateError::SecretProtection(error.to_string()))?;
+        String::from_utf8(plain)
+            .map_err(|error| DesktopStateError::SecretProtection(error.to_string()))
+    }
+}
+
+#[cfg(windows)]
+fn dpapi_protect(bytes: &[u8]) -> Result<Vec<u8>, DesktopStateError> {
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: bytes.len() as u32,
+        pbData: bytes.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
+
+    let ok = unsafe {
+        CryptProtectData(
+            &input,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+    if ok == 0 {
+        return Err(DesktopStateError::SecretProtection(
+            "CryptProtectData failed".to_string(),
+        ));
+    }
+
+    let encrypted =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    unsafe {
+        let _ = LocalFree(output.pbData as _);
+    }
+
+    Ok(encrypted)
+}
+
+#[cfg(windows)]
+fn dpapi_unprotect(bytes: &[u8]) -> Result<Vec<u8>, DesktopStateError> {
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: bytes.len() as u32,
+        pbData: bytes.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
+
+    let ok = unsafe {
+        CryptUnprotectData(
+            &input,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+    if ok == 0 {
+        return Err(DesktopStateError::SecretProtection(
+            "CryptUnprotectData failed".to_string(),
+        ));
+    }
+
+    let plain =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+    unsafe {
+        let _ = LocalFree(output.pbData as _);
+    }
+
+    Ok(plain)
+}
+
+fn restrict_runtime_permissions(path: &Path) -> Result<(), DesktopStateError> {
+    #[cfg(windows)]
+    {
+        let account = current_windows_account()?;
+        let grant = if path.is_dir() {
+            format!("{account}:(OI)(CI)F")
+        } else {
+            format!("{account}:F")
+        };
+        let status = Command::new("icacls")
+            .arg(path)
+            .args(["/inheritance:r", "/grant:r", &grant])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if !status.success() {
+            return Err(DesktopStateError::SecretProtection(format!(
+                "icacls failed for {}",
+                path.display()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn current_windows_account() -> Result<String, DesktopStateError> {
+    let output = Command::new("whoami").output()?;
+    if !output.status.success() {
+        return Err(DesktopStateError::SecretProtection(
+            "whoami failed".to_string(),
+        ));
+    }
+
+    let account = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if account.is_empty() {
+        return Err(DesktopStateError::SecretProtection(
+            "whoami returned an empty account".to_string(),
+        ));
+    }
+
+    Ok(account)
 }
 
 struct RuntimeDirGuard {
@@ -902,8 +1123,55 @@ fn now_unix_ms() -> u64 {
 struct DesktopState {
     #[serde(rename = "Profiles", default)]
     profiles: Vec<DesktopProfile>,
-    #[serde(rename = "Secrets", default)]
-    secrets: BTreeMap<String, String>,
+    #[serde(
+        rename = "Secrets",
+        default,
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    legacy_secrets: BTreeMap<String, String>,
+    #[serde(rename = "ProtectedSecrets", default)]
+    protected_secrets: BTreeMap<String, String>,
+}
+
+impl DesktopState {
+    fn resolved_secrets(&self) -> Result<BTreeMap<String, String>, DesktopStateError> {
+        let mut resolved = BTreeMap::new();
+        for (key, value) in &self.protected_secrets {
+            resolved.insert(key.clone(), unprotect_secret(value)?);
+        }
+        for (key, value) in &self.legacy_secrets {
+            resolved.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+
+        Ok(resolved)
+    }
+
+    fn insert_protected_secrets(
+        &mut self,
+        secrets: BTreeMap<String, String>,
+    ) -> Result<(), DesktopStateError> {
+        self.migrate_plaintext_secrets()?;
+        for (key, value) in secrets {
+            self.protected_secrets.insert(key, protect_secret(&value)?);
+        }
+
+        Ok(())
+    }
+
+    fn migrate_plaintext_secrets(&mut self) -> Result<bool, DesktopStateError> {
+        if self.legacy_secrets.is_empty() {
+            return Ok(false);
+        }
+
+        let legacy = std::mem::take(&mut self.legacy_secrets);
+        for (key, value) in legacy {
+            self.protected_secrets
+                .entry(key)
+                .or_insert(protect_secret(&value)?);
+        }
+
+        Ok(true)
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1219,6 +1487,10 @@ mod tests {
         assert!(plan.redacted_preview.contains("config.toml"));
         assert!(!plan.redacted_preview.contains("real-password"));
         assert!(!plan.redacted_preview.contains("real-socks-password"));
+        let migrated = fs::read_to_string(&temp_path).unwrap();
+        assert!(migrated.contains("ProtectedSecrets"));
+        assert!(!migrated.contains("real-password"));
+        assert!(!migrated.contains("real-socks-password"));
 
         fs::remove_file(temp_path).unwrap();
     }
@@ -1310,5 +1582,13 @@ mod tests {
             secrets.get("secret://profile-1/endpoint.client_random"),
             Some(&"random-token".to_string())
         );
+    }
+
+    #[test]
+    fn secret_protection_roundtrips_without_plaintext() {
+        let protected = protect_secret("very-secret-value").unwrap();
+
+        assert!(!protected.contains("very-secret-value"));
+        assert_eq!(unprotect_secret(&protected).unwrap(), "very-secret-value");
     }
 }

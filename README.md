@@ -153,6 +153,8 @@ Implemented in the Rust + Flutter path:
 - Flutter logs shell wired into the main UI.
 - Flutter Add Server import shell wired into the main UI.
 - TrustTunnel TOML/tt-link import into `%LOCALAPPDATA%\ProxyOpenHub\desktop-state.json`.
+- Imported secrets are stored as DPAPI-protected `ProtectedSecrets`; legacy plaintext `Secrets` are migrated on load.
+- Import preview requires confirmation for high-risk TLS and LAN listener settings before saving.
 - TOML parser handles UTF-8 BOM files from Windows editors.
 - Persistent app settings saved to `%LOCALAPPDATA%\ProxyOpenHub\app-settings.json`.
 - Live network metrics service based on OS counters while connected.

@@ -45,6 +45,7 @@ class ServerProfile {
     required this.pingMs,
     required this.dns,
     required this.load,
+    required this.tlsVerificationDisabled,
   });
 
   final String id;
@@ -55,6 +56,7 @@ class ServerProfile {
   final int pingMs;
   final String dns;
   final double load;
+  final bool tlsVerificationDisabled;
 
   static ServerProfile fromDesktopStateJson(Map<String, dynamic> json) {
     final endpoint = (json['Endpoint'] as Map?)?.cast<String, dynamic>() ?? {};
@@ -69,6 +71,9 @@ class ServerProfile {
     final ping = (testResult['PingMs'] as num?)?.toInt() ?? 0;
     final protocol = endpoint['UpstreamProtocol'] == 1 ? 'HTTP/3' : 'HTTP/2';
     final listenerMode = listener['Mode'] == 1 ? 'SOCKS' : 'TUN';
+    final certificatePem = endpoint['CertificatePem']?.toString() ?? '';
+    final tlsVerificationDisabled = endpoint['SkipVerification'] == true ||
+        certificatePem.trim().isNotEmpty;
 
     return ServerProfile(
       id: json['Id']?.toString() ?? hostname,
@@ -79,6 +84,7 @@ class ServerProfile {
       pingMs: ping,
       dns: '$protocol - $listenerMode',
       load: ping <= 0 ? 0 : (ping / 220).clamp(0.08, 0.95).toDouble(),
+      tlsVerificationDisabled: tlsVerificationDisabled,
     );
   }
 }

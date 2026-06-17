@@ -72,12 +72,10 @@ $env:POH_TRUSTTUNNEL_CORE_PATH = "C:\path\to\trusttunnel_client.exe"
 - Settings shell, logs shell и import shell в Flutter.
 - Live network metrics по OS counters.
 - Реестр доверенных источников для будущих optional-ядер.
-- Security hardening: pinned bundled core hash, stdin import, runtime cleanup, PID identity check, warning'и для insecure TLS и LAN listener, редакция логов по значениям секретов.
+- Security hardening: pinned bundled core hash, DPAPI `ProtectedSecrets`, stdin import, runtime cleanup, restrictive ACL, PID identity check, pre-save warning'и для insecure TLS и LAN listener, редакция логов по значениям секретов.
 
 ## Что еще в работе
 
-- DPAPI / Windows Credential Manager вместо plaintext `Secrets` в MVP state.
-- Pre-save confirmation для high-risk import warnings.
 - Полный Flutter-редактор routing/profile settings.
 - Trusted download/update UI для sing-box, NaiveProxy, Xray-core, Hysteria2.
 - Installer, tray behavior и packaging.

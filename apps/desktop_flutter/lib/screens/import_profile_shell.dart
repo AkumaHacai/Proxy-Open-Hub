@@ -70,7 +70,7 @@ class _ImportProfileShellState extends State<ImportProfileShell> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    'Paste a tt:// link or a TrustTunnel TOML config. Secrets are stored in the local state map and profiles keep only secret references.',
+                    'Paste a tt:// link or a TrustTunnel TOML config. Secrets are protected by the Rust backend and risky fields are shown before save.',
                     style: TextStyle(color: palette.muted, fontSize: 13),
                   ),
                   const SizedBox(height: 16),
@@ -169,11 +169,34 @@ class _ImportProfileShellState extends State<ImportProfileShell> {
 
     setState(() {
       _busy = true;
-      _message = 'Importing profile...';
+      _message = 'Checking profile...';
       _error = null;
     });
 
     try {
+      final preview =
+          await widget.sessionService.previewTrustTunnelProfile(text);
+      if (!mounted) {
+        return;
+      }
+
+      if (preview.warnings.isNotEmpty) {
+        final confirmed = await _confirmWarnings(preview);
+        if (!confirmed) {
+          if (mounted) {
+            setState(() {
+              _message = 'Import cancelled before saving.';
+              _error = null;
+            });
+          }
+          return;
+        }
+      }
+
+      if (mounted) {
+        setState(() => _message = 'Importing profile...');
+      }
+
       final result = await widget.sessionService.importTrustTunnelProfile(text);
       if (!mounted) {
         return;
@@ -182,7 +205,7 @@ class _ImportProfileShellState extends State<ImportProfileShell> {
       setState(() {
         _message = result.warnings.isEmpty
             ? 'Imported ${result.profileName}.'
-            : 'Imported ${result.profileName} with ${result.warnings.length} security warning(s).';
+            : 'Imported ${result.profileName}; risky settings were confirmed.';
         _error = null;
       });
       widget.onImported(result);
@@ -200,6 +223,140 @@ class _ImportProfileShellState extends State<ImportProfileShell> {
         setState(() => _busy = false);
       }
     }
+  }
+
+  Future<bool> _confirmWarnings(BackendImportPreview preview) async {
+    final palette = PohPalette.of(context);
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          child: Container(
+            width: 480,
+            padding: const EdgeInsets.all(22),
+            decoration: BoxDecoration(
+              color: palette.surface,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: palette.border),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.24),
+                  blurRadius: 34,
+                  offset: const Offset(0, 16),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 36,
+                      height: 36,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE26060).withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: const Icon(
+                        Icons.warning_rounded,
+                        color: Color(0xFFE26060),
+                        size: 21,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'Security warning',
+                        style: TextStyle(
+                          color: palette.text,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'Profile "${preview.profileName}" contains risky settings. Review them before saving.',
+                  style: TextStyle(
+                    color: palette.muted,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Container(
+                  constraints: const BoxConstraints(maxHeight: 190),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: palette.background,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: palette.border),
+                  ),
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: preview.warnings.length,
+                    separatorBuilder: (_, __) => Divider(color: palette.border),
+                    itemBuilder: (context, index) {
+                      final warning = preview.warnings[index];
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            warning.field,
+                            style: TextStyle(
+                              color: palette.text,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            warning.message,
+                            style: TextStyle(
+                              color: palette.muted,
+                              fontSize: 12,
+                              height: 1.3,
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Row(
+                  children: [
+                    const Spacer(),
+                    OutlinedButton(
+                      onPressed: () => Navigator.of(context).pop(false),
+                      child: const Text('Cancel'),
+                    ),
+                    const SizedBox(width: 10),
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFFE26060),
+                        foregroundColor: Colors.white,
+                      ),
+                      onPressed: () => Navigator.of(context).pop(true),
+                      child: const Text('Save anyway'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    return result == true;
   }
 }
 

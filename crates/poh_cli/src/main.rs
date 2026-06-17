@@ -68,6 +68,7 @@ fn main() -> ExitCode {
         Some("runtime-smoke") => runtime_smoke(),
         Some("store-smoke") => store_smoke(),
         Some("session-smoke") => session_smoke(),
+        Some("desktop-preview-profile") => desktop_preview_profile(&args[1..]),
         Some("desktop-import-profile") => desktop_import_profile(&args[1..]),
         Some("desktop-session-plan") => desktop_session_plan(&args[1..]),
         Some("desktop-session-start") => desktop_session_start(&args[1..]),
@@ -77,7 +78,7 @@ fn main() -> ExitCode {
         Some(command) => {
             eprintln!("Unknown command: {command}");
             eprintln!(
-                "Usage: poh_cli [list|sources|runtime-smoke|store-smoke|session-smoke|desktop-import-profile <input-text-file|->|desktop-session-plan <state-path> <profile-id>|desktop-session-start <state-path> <profile-id>|desktop-session-stop|desktop-session-status|desktop-session-log|detect <profile text>]"
+                "Usage: poh_cli [list|sources|runtime-smoke|store-smoke|session-smoke|desktop-preview-profile <input-text-file|->|desktop-import-profile <input-text-file|->|desktop-session-plan <state-path> <profile-id>|desktop-session-start <state-path> <profile-id>|desktop-session-stop|desktop-session-status|desktop-session-log|detect <profile text>]"
             );
             ExitCode::from(2)
         }
@@ -278,6 +279,35 @@ fn desktop_import_profile(args: &[String]) -> ExitCode {
         }
         Err(error) => {
             eprintln!("Desktop import failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn desktop_preview_profile(args: &[String]) -> ExitCode {
+    let [input_path] = args else {
+        eprintln!("Usage: poh_cli desktop-preview-profile <input-text-file|->");
+        return ExitCode::from(2);
+    };
+
+    let input = match read_import_input(input_path) {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("Cannot read import input: {error}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match desktop_state::preview_desktop_profile(&input) {
+        Ok(result) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).expect("preview result should serialize")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Desktop preview failed: {error}");
             ExitCode::from(1)
         }
     }
