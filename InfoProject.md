@@ -1,142 +1,158 @@
-# Proxy Open Hub: проект, Rust-часть и проверка готовности
+# Proxy Open Hub: Project Map And Rust Debug Guide
 
-## Что это за проект
+Proxy Open Hub is a modular Windows proxy/VPN hub. The project is migrating from
+the old WPF/C# client to:
 
-Proxy Open Hub - модульный Windows-клиент для прокси/VPN-ядер. Сейчас активная миграция идет от старого WPF/C# клиента к новой структуре:
+- Rust backend for core adapters, config import, secret handling, trusted core
+  storage, process launch, logs, and security checks.
+- Flutter desktop UI for the main window, compact/expanded modes, settings,
+  logs, import dialogs, and future per-core screens.
+- TrustTunnel as the first working core. sing-box, NaiveProxy, Xray-core, and
+  Hysteria2 are planned optional modules.
 
-- Rust отвечает за ядра, импорт конфигов, безопасность, материализацию runtime-конфигов, запуск процессов, логи и проверки.
-- Flutter отвечает за интерфейс: главное окно, compact/expanded режимы, настройки, логи и окна импорта.
-- TrustTunnel сейчас первое рабочее ядро. Остальные ядра, например sing-box, NaiveProxy, Xray-core и Hysteria2, готовятся как опциональные модули через доверенные источники.
+The old WPF project and HTML references are archived under:
 
-Старый WPF проект и HTML-референсы сохранены в `backups/Old Files/2026-06-16-wpf-and-references/`. Активный клиент запускается из `apps/desktop_flutter`.
+```text
+backups/Old Files/2026-06-16-wpf-and-references/
+```
 
-## Главная структура
+The active UI is:
+
+```text
+apps/desktop_flutter
+```
+
+## Repository Map
 
 ```text
 Cargo.toml                         Rust workspace
 crates/poh_core                    core adapters, TrustTunnel parser, security policy
-crates/poh_core_runner             materialization runtime files + secret substitution
-crates/poh_core_session            process launch abstractions
-crates/poh_core_store              trusted core install/verify store
-crates/poh_cli                     CLI bridge for Flutter
+crates/poh_core_runner             runtime file materialization + secret substitution
+crates/poh_core_session            low-level process launch helpers
+crates/poh_core_store              trusted core install/download/verify store
+crates/poh_cli                     CLI bridge used by Flutter
 apps/desktop_flutter               Flutter desktop UI
-core-registry/trusted-sources.json trusted source registry for downloadable cores
+core-registry/trusted-sources.json trusted source registry for optional cores
 native/bundled/win-x64             bundled TrustTunnel runtime
-scripts/check.ps1                  full local verification
+scripts/check.ps1                  local verification
 scripts/build-desktop.ps1          build Rust CLI + Flutter Windows app
-scripts/run-desktop.ps1            run built app with POH_CLI_PATH
+scripts/run-desktop.ps1            run the built desktop app
 ```
 
-## Как работает Rust часть
+## Rust Layer
 
 ### `poh_core`
 
-Это общий слой модели и адаптеров ядер.
+This crate owns the adapter-facing model:
 
-Что уже есть:
+- `CoreRegistry` lists built-in adapters.
+- `TrustTunnelAdapter` detects and imports `tt://` links and TrustTunnel TOML.
+- `TrustTunnelTomlParser` reads endpoint, listener, routing, DNS, proxy, and
+  secret-related fields.
+- `TrustTunnelTomlBuilder` builds runtime TOML again from the internal profile.
+- Security policies validate trusted sources, runtime paths, environment keys,
+  pinned release data, installed manifests, and SHA-256 values.
 
-- `CoreRegistry` хранит доступные адаптеры.
-- `TrustTunnelAdapter` умеет определять и импортировать `tt://` и TrustTunnel TOML.
-- `TrustTunnelTomlParser` парсит endpoint, routing, listener TUN/SOCKS, DNS, secrets.
-- `TrustTunnelTomlBuilder` собирает runtime TOML обратно.
-- Security policy проверяет доверенные источники, runtime-файлы, редактируемые secret-значения и fake/tampered core manifests.
-
-Важный момент: generic `Profile` не хранит реальные секреты. Парсер возвращает секреты отдельно как candidates, дальше они превращаются в `secret://...` ссылки.
+Important: the generic `Profile` model does not store plaintext secrets.
+Parsers return secret candidates separately. Desktop import converts them into
+`secret://...` references and stores the real values in DPAPI-protected state.
 
 ### `poh_core_runner`
 
-Материализует runtime-конфиг перед запуском ядра.
+This crate materializes runtime files before launch:
 
-Что делает:
-
-- Подставляет секреты через resolver.
-- Пишет runtime-файлы только внутрь разрешенной временной директории.
-- Блокирует absolute paths, `..`, Windows backslash paths, опасные environment keys и слишком большие generated configs.
-- Дает redacted preview, чтобы UI мог показывать конфиг без утечки паролей.
+- substitutes secrets through a resolver;
+- writes generated configs only inside the approved runtime directory;
+- rejects absolute paths, `..`, Windows backslash paths, unsafe env keys, and
+  oversized generated files;
+- returns redacted previews for UI/log display.
 
 ### `poh_core_session`
 
-Низкоуровневый запуск процессов.
-
-Сейчас используется как безопасная модель для будущей унификации запуска разных ядер. В desktop-flow TrustTunnel стартует через `poh_cli`, но session crate уже тестирует launch spec, missing executable и redacted output.
+This crate contains process-launch primitives. It is intentionally low-level
+right now: launch spec, executable checks, process start/wait, and redacted
+output. The next architecture step is a higher-level `SessionManager` with one
+active core session, readiness probes, stop timeout, watchdog, and rollback
+hooks.
 
 ### `poh_core_store`
 
-Будущая база для загрузки и обновления ядер.
+This crate is the managed core basket:
 
-Что уже заложено:
+- validates trusted catalog entries;
+- requires active installable GitHub sources to have `pinned_release`;
+- stores installed versions under `cores/<core_id>/<version>/`;
+- writes per-core `active.json`;
+- supports single-file and zip/multifile artifacts;
+- extracts zip files with zip-slip and duplicate-path guards;
+- records hashes for installed files and verifies them later;
+- downloads only pinned GitHub release assets and verifies SHA-256 before the
+  bytes can become an install request.
 
-- Trusted source registry.
-- Проверка source type, owner/repo, asset pattern и `pinned_release`.
-- SHA-256 validation.
-- Запрет path traversal при распаковке/установке.
-- Проверка установленного executable на tampering.
-- Список установленных версий через `CoreStore::list_installed()`.
-- Active version на ядро через `active.json`.
-- Zip/multifile artifacts с zip-slip guard, duplicate-path rejection и hashes установленных файлов.
+Downloader rules:
 
-Пока install/download UI не включен в приложение. Это следующий крупный этап.
+- no "latest release" lookup;
+- no download from unpinned or planned sources;
+- URL is derived from `owner`, `repo`, `pinned_release.version`, and
+  `pinned_release.asset_name`;
+- bytes are size-limited;
+- SHA-256 is checked before install staging;
+- install UI is still disabled until real pins and descriptors are added.
 
 ### `poh_cli`
 
-CLI-мост между Flutter и Rust.
-
-Основные команды:
+The Flutter app talks to Rust through this CLI. Useful commands:
 
 ```powershell
 .\target\debug\poh_cli.exe list
 .\target\debug\poh_cli.exe sources
 .\target\debug\poh_cli.exe detect "<profile text>"
+.\target\debug\poh_cli.exe core-list-installed
+.\target\debug\poh_cli.exe core-download-plan <core-id>
+.\target\debug\poh_cli.exe core-install <core-id> <executable-relative-path>
 .\target\debug\poh_cli.exe desktop-import-profile C:\path\to\profile.toml
 .\target\debug\poh_cli.exe desktop-session-plan <desktop-state.json> <profile-id>
 .\target\debug\poh_cli.exe desktop-session-start <desktop-state.json> <profile-id>
-.\target\debug\poh_cli.exe desktop-session-stop
 .\target\debug\poh_cli.exe desktop-session-status
 .\target\debug\poh_cli.exe desktop-session-log
+.\target\debug\poh_cli.exe desktop-session-stop
 ```
 
-Flutter ищет `poh_cli.exe` рядом с `proxy_open_hub.exe` или через `POH_CLI_PATH`.
+`core-install` currently needs `<executable-relative-path>` because
+`CoreLaunchDescriptor` is not implemented yet. After descriptors exist, this
+will be known per core.
 
-## Desktop state и секреты
+## Desktop State And Secrets
 
-Новый state:
+Current state path:
 
 ```text
 %LOCALAPPDATA%\ProxyOpenHub\desktop-state.json
 ```
 
-Старый state, который может быть подхвачен как база:
+Legacy state path that may be migrated:
 
 ```text
 %LOCALAPPDATA%\TrustTunnel\desktop-state.json
 ```
 
-Импорт TrustTunnel профиля делает так:
+Import flow:
 
-1. Rust парсит `tt://` или TOML.
-2. Создает `DesktopProfile`.
-3. Endpoint/listener получают только `PasswordSecretRef` / `ClientRandomSecretRef`.
-4. Реальные значения шифруются через Windows DPAPI и кладутся в `ProtectedSecrets`.
-5. Старый plaintext `Secrets` мигрирует в `ProtectedSecrets` при загрузке state.
-6. Flutter перечитывает state и показывает новый сервер.
+1. Rust parses `tt://` or TOML.
+2. Rust creates a desktop profile with secret references.
+3. Real password/client-random values are protected with Windows DPAPI.
+4. Legacy plaintext `Secrets` are migrated into `ProtectedSecrets` on load.
+5. Flutter reloads state and shows the imported server.
 
-## Как дебажить Rust
+## Debug Commands
 
-### Быстрая проверка всего проекта
+Full project check:
 
 ```powershell
 .\scripts\check.ps1
 ```
 
-Скрипт выполняет:
-
-- `cargo fmt --all --check`
-- `cargo test --workspace`
-- `dart format --set-exit-if-changed`
-- `flutter analyze`
-- `flutter test`
-
-### Только Rust
+Rust only:
 
 ```powershell
 cargo fmt --all --check
@@ -144,7 +160,34 @@ cargo test --workspace
 cargo build -p poh_cli
 ```
 
-### Проверить импорт TOML без порчи реального state
+Build and run desktop:
+
+```powershell
+.\scripts\build-desktop.ps1
+.\scripts\run-desktop.ps1
+```
+
+Release exe after build:
+
+```text
+apps/desktop_flutter/build/windows/x64/runner/Release/proxy_open_hub.exe
+```
+
+The app must be able to find:
+
+```text
+apps/desktop_flutter/build/windows/x64/runner/Release/poh_cli.exe
+```
+
+Override CLI path for local debugging:
+
+```powershell
+$env:POH_CLI_PATH = "C:\Users\mirot\Documents\TT gui\target\debug\poh_cli.exe"
+```
+
+## Safe Import Debug
+
+Use a temporary `%LOCALAPPDATA%` to test import without touching real profiles:
 
 ```powershell
 $temp = Join-Path $env:TEMP ("poh-debug-" + [guid]::NewGuid().ToString("N"))
@@ -159,11 +202,16 @@ $env:LOCALAPPDATA = $old
 Remove-Item -Recurse -Force $temp
 ```
 
-Это лучший способ проверить импорт, не меняя реальные профили пользователя.
+## TrustTunnel Runtime Debug
 
-### Проверить запуск TrustTunnel
+Bundled runtime:
 
-Перед запуском нужен state и profile id:
+```text
+native/bundled/win-x64/trusttunnel_client.exe
+native/bundled/win-x64/wintun.dll
+```
+
+Session commands:
 
 ```powershell
 .\target\debug\poh_cli.exe desktop-session-plan "%LOCALAPPDATA%\ProxyOpenHub\desktop-state.json" <profile-id>
@@ -173,84 +221,35 @@ Remove-Item -Recurse -Force $temp
 .\target\debug\poh_cli.exe desktop-session-stop
 ```
 
-Путь к TrustTunnel core:
-
-```text
-native/bundled/win-x64/trusttunnel_client.exe
-native/bundled/win-x64/wintun.dll
-```
-
-Для локального дебага можно переопределить путь. В обычном запуске это заблокировано; нужен `POH_DEV=1` или debug build, и бинарь всё равно проверяется по pinned SHA-256:
+For local development only, an alternate TrustTunnel binary can be tested with
+`POH_DEV=1` or a debug build. The binary still must match the pinned SHA-256:
 
 ```powershell
 $env:POH_DEV = "1"
 $env:POH_TRUSTTUNNEL_CORE_PATH = "C:\path\to\trusttunnel_client.exe"
 ```
 
-## Как собирать и запускать UI
+## Current Status
 
-```powershell
-.\scripts\build-desktop.ps1
-.\scripts\run-desktop.ps1
-```
+Ready:
 
-Готовый exe:
+- Rust workspace builds and tests.
+- TrustTunnel TOML/deeplink import works.
+- UTF-8 BOM TOML files are accepted.
+- Flutter Add Server calls Rust import.
+- Flutter loads real profiles from `desktop-state.json`.
+- Connect/Disconnect starts/stops the real bundled TrustTunnel core.
+- Logs and redacted previews flow through Rust.
+- Live network metrics read OS counters while connected.
+- DPAPI `ProtectedSecrets` are used for imported secrets.
+- Import preview blocks risky TLS/LAN settings until confirmed.
+- Trusted core store supports active version tracking, zip artifacts, pinned
+  archive SHA, installed file hashes, and pinned GitHub download planning.
 
-```text
-apps/desktop_flutter/build/windows/x64/runner/Release/proxy_open_hub.exe
-```
+Still in progress:
 
-Рядом должен лежать:
-
-```text
-apps/desktop_flutter/build/windows/x64/runner/Release/poh_cli.exe
-```
-
-Если `poh_cli.exe` не найден, Connect/import/logs не смогут говорить с Rust backend.
-
-## Что готово сейчас
-
-- Rust workspace создан и проходит тесты.
-- TrustTunnel TOML/deeplink import работает.
-- TOML parser принимает UTF-8 BOM файлы из Windows редакторов.
-- Flutter Add Server открывает окно импорта и вызывает Rust CLI.
-- Flutter грузит реальные профили из `desktop-state.json`.
-- Connect/Disconnect вызывает Rust CLI и запускает реальный `trusttunnel_client.exe`.
-- Логи читаются через Rust CLI и редактируются редактором секретов.
-- Live metrics читаются через OS network counters.
-- Настройки приложения сохраняются в `%LOCALAPPDATA%\ProxyOpenHub\app-settings.json`.
-- Trusted-source registry и проверки fake/tampered core artifacts заложены для будущих ядер.
-- GitHub-release ядра требуют `pinned_release` перед включением install flow.
-- Core store умеет хранить active version и выводить installed cores через CLI.
-- Core store уже умеет безопасно устанавливать zip/multifile artifacts и проверять installed file hashes.
-- Секреты профилей хранятся как DPAPI `ProtectedSecrets`.
-- Import preview показывает TLS/LAN warnings до сохранения и требует подтверждение.
-
-## Что еще не закончено
-
-- Полный routing/profile editor еще нужно перенести из WPF в Flutter.
-- Log streaming пока заменен manual refresh.
-- Exact TrustTunnel/Wintun adapter matching для traffic metrics еще приблизительный.
-- Download/update UI для sing-box, NaiveProxy, Xray-core, Hysteria2 еще не включен.
-- Нужны tray, installer, packaging и подпись сборки.
-
-## Легит-чек перед продолжением разработки
-
-Перед тем как считать этап рабочим:
-
-```powershell
-.\scripts\check.ps1
-.\scripts\build-desktop.ps1
-.\scripts\run-desktop.ps1
-```
-
-Ручная проверка:
-
-- Открывается главный экран.
-- `Add Server` открывает импорт.
-- TOML/tt-link импортируется и появляется в списке.
-- `desktop-state.json` содержит `PasswordSecretRef`, а не пароль внутри профиля.
-- `Connect` запускает процесс или возвращает понятную ошибку.
-- `Logs` показывает лог или причину отсутствия активной сессии.
-- Theme toggle не моргает чужой палитрой.
-- Compact/expanded режим не дает overflow и не ломает центральную кнопку.
+- `SessionManager` with a strict state machine and readiness probes.
+- `CoreLaunchDescriptor` for per-core executable/config/log knowledge.
+- TrustTunnel migration from app-local bundle into managed core store.
+- NaiveProxy/sing-box/Xray/Hysteria adapters and install UI.
+- Installer, tray behavior, and release packaging.

@@ -21,3 +21,4 @@ base64 = "0.22"
 sha2 = "0.10"
 windows-sys = "0.59"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+ureq = "2"

@@ -1,49 +1,56 @@
 # Modularity Architecture Progress
 
-Дата старта: 2026-06-18
+Start date: 2026-06-18
 
-Цель: перевести Proxy Open Hub на модульную архитектуру, где адаптеры остаются нашим Rust-кодом, а бинарники ядер устанавливаются, проверяются и обновляются через управляемую корзину.
+Goal: move Proxy Open Hub to a modular architecture where adapters remain in our
+Rust code, while core binaries are installed, verified, updated, and isolated by
+the managed core store.
 
-## Phase A — фундамент модульности
+## Phase A - Modularity Foundation
 
-- [x] A1. Добавить модель `pinned_release` в trusted source catalog.
-- [x] A1. Валидировать pinned release: версия, asset name, SHA-256, allowed asset pattern.
-- [x] A1. Запретить installable GitHub source без `pinned_release`.
-- [x] A1. Сверять installed manifest с pinned release перед verify/start.
-- [x] A2. Добавить `CoreStore::list_installed()`.
-- [x] A2. Добавить `active.json` и `CoreStore::active_version()` / `set_active_version()`.
-- [x] A2. Делать установленную версию активной после успешного install.
-- [x] A2. Добавить CLI `poh_cli core-list-installed`.
-- [x] A2. Добавить zip/multifile install с zip-slip guard.
-- [x] A2. Разделить SHA pinned archive и hashes установленных файлов для verify/tamper detection.
-- [ ] A2. Добавить GC старых версий: active + rollback.
-- [ ] A3. Добавить HTTPS downloader: только pinned GitHub asset + SHA-256 verify.
-- [ ] A4. Ввести `SessionManager` с состояниями, lock, readiness probe, watchdog.
-- [ ] A5. Ввести `CoreLaunchDescriptor` и убрать TrustTunnel-specific запуск из desktop session слоя.
+- [x] A1. Add `pinned_release` to the trusted source catalog.
+- [x] A1. Validate pinned release metadata: version, asset name, SHA-256, allowed asset pattern.
+- [x] A1. Reject installable GitHub sources without `pinned_release`.
+- [x] A1. Check installed manifests against pinned release before verify/start.
+- [x] A2. Add `CoreStore::list_installed()`.
+- [x] A2. Add per-core `active.json` plus `CoreStore::active_version()` / `set_active_version()`.
+- [x] A2. Mark a version active after successful install.
+- [x] A2. Add CLI command `poh_cli core-list-installed`.
+- [x] A2. Add zip/multifile install with zip-slip guard.
+- [x] A2. Separate pinned archive SHA from installed file hashes for tamper detection.
+- [ ] A2. Add GC for old versions: active + rollback retention.
+- [x] A3. Add HTTPS downloader for pinned GitHub assets with SHA-256 verification.
+- [x] A3. Add CLI `core-download-plan <core-id>` and manual `core-install <core-id> <executable-relative-path>`.
+- [ ] A4. Add `SessionManager` with states, single-instance lock, readiness probe, and watchdog.
+- [ ] A5. Add `CoreLaunchDescriptor` so install/start no longer needs per-core CLI path knowledge.
 
-## Phase B — TrustTunnel как управляемый модуль
+## Phase B - TrustTunnel As Managed Module
 
-- [ ] Перенести bundled TrustTunnel в store layout `cores/trusttunnel/<version>/`.
-- [ ] Сохранить pinned SHA checks для `trusttunnel_client.exe` и `wintun.dll`.
-- [ ] Запускать TrustTunnel через общий descriptor/session слой.
-- [ ] Оставить миграционный путь для текущего app-local bundle до появления официального download source.
+- [ ] Move bundled TrustTunnel into store layout `cores/trusttunnel/<version>/`.
+- [ ] Keep pinned SHA checks for `trusttunnel_client.exe` and `wintun.dll`.
+- [ ] Launch TrustTunnel through the shared descriptor/session layer.
+- [ ] Keep a migration path for the current app-local bundle until an official pinned download source exists.
 
-## Phase C — NaiveProxy как первый скачиваемый модуль
+## Phase C - NaiveProxy As First Downloadable Module
 
-- [ ] Зафиксировать pinned release: version, asset name, SHA-256.
-- [ ] Добавить `NaiveProxyAdapter` в `poh_core`.
-- [ ] Импортировать `config.json` и proxy URL без хранения пароля в профиле.
-- [ ] Материализовать `config.json` через secret placeholder + DPAPI secret store.
-- [ ] Подключить install flow через catalog/store/downloader.
-- [ ] Подключить LocalProxy readiness probe и system proxy rollback.
+- [ ] Pin release metadata: version, asset name, SHA-256.
+- [ ] Add `NaiveProxyAdapter` to `poh_core`.
+- [ ] Import `config.json` and proxy URLs without storing plaintext passwords in profiles.
+- [ ] Materialize `config.json` through secret placeholders + DPAPI secret store.
+- [ ] Wire install flow through catalog/store/downloader.
+- [ ] Add LocalProxy readiness probe and system proxy rollback.
 
-## Уже связано с прежней работой
+## Already Connected To Earlier Work
 
-- Секреты остаются в DPAPI `ProtectedSecrets`; новая модульность не возвращает plaintext state.
-- Runtime/session/state файлы продолжают получать restrictive ACL.
-- Trusted-source policy теперь строже: скачиваемое ядро должно иметь pinned release до включения install UI.
-- Fake/swapped core protection усилена: installed manifest теперь сверяется не только с owner/repo/pattern/SHA, но и с pinned version/asset/SHA.
+- Secrets remain in DPAPI `ProtectedSecrets`; the modular path does not reintroduce plaintext state.
+- Runtime/session/state/config/log files keep restrictive ACLs.
+- Trusted source policy is strict: a downloadable core must have a pinned release before install UI can be enabled.
+- Fake/swapped core protection now checks source owner/repo, asset pattern, pinned version/asset/SHA, archive SHA, and installed file hashes.
+- Downloader only supports installable active GitHub-release sources and verifies the downloaded bytes before install staging.
 
-## Следующий безопасный шаг
+## Next Safe Step
 
-Реализовать zip/multifile install в `poh_core_store` без сетевого downloader. Это даст основу для NaiveProxy/sing-box архивов и не включит автоматические скачивания раньше проверки pin-ов.
+Implement A4 `SessionManager`: one active core session at a time, explicit
+`Idle -> Preparing -> Starting -> Running -> Stopping/Faulted` state machine,
+readiness probes, stop timeout with force kill, startup orphan cleanup, and
+system proxy rollback hooks.

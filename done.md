@@ -1,64 +1,69 @@
-# Done — security pass from LLM_Cloud
+# Done - Security And Modularity Work
 
-Дата: 2026-06-18
+Date: 2026-06-18
 
-## Сделано
+## LLM_Cloud Security Pass
 
-- Прочитан аудит из `LLM_Cloud`: `todo.md`, `security-findings.md`, `security.md`, `instruct.md`.
-- Закрыта основная часть T-1/F-1 для bundled TrustTunnel:
-  - убран поиск `trusttunnel_client.exe` по CWD и родительским каталогам;
-  - запуск теперь ищет bundled core только рядом с приложением: `native/bundled/win-x64/trusttunnel_client.exe`;
-  - добавлена проверка SHA-256 для `trusttunnel_client.exe`;
-  - добавлена проверка SHA-256 для `wintun.dll`;
-  - `POH_TRUSTTUNNEL_CORE_PATH` разрешен только для dev/debug запуска.
-- Обновлен `scripts/build-desktop.ps1`: при сборке Flutter рядом с приложением копируется bundled TrustTunnel core и sidecar-файлы.
-- Частично закрыта T-2/F-2:
-  - `desktop-state.json` больше не хранит новые секреты plaintext: значения идут в DPAPI `ProtectedSecrets`;
-  - legacy plaintext `Secrets` мигрирует в `ProtectedSecrets` при загрузке state;
-  - добавлены рестриктивные ACL для state/runtime/config/session/log файлов;
-  - Flutter import больше не пишет `tt://`/TOML payload во временный файл;
-  - `poh_cli desktop-import-profile -` принимает импорт через stdin;
-  - добавлен лимит размера импорта;
-  - добавлен лимит размера `desktop-state.json`;
-  - `runtime_dir` очищается при раннем падении ядра;
-  - старые runtime-каталоги очищаются перед новым стартом, если активной сессии нет.
-- Частично закрыта T-3/F-3:
-  - Windows status/stop больше не проверяет PID через `stdout.contains`;
-  - `tasklist` разбирается как CSV;
-  - PID сверяется с ожидаемым образом `trusttunnel_client.exe` перед `taskkill`.
-- Частично закрыты T-4/F-4 и T-5/F-5:
-  - TrustTunnel adapter выдает `ValidationWarning` для `skip_verification`;
-  - предупреждение выдается для кастомного TLS certificate;
-  - предупреждение выдается для SOCKS/HTTP listener, открытого в LAN или не на loopback;
-  - Flutter запускает preview до сохранения и требует подтверждение для high-risk warnings;
-  - профили с отключенной TLS verification / custom certificate получают постоянный UI-индикатор.
-- Частично закрыта T-6/F-6:
-  - session logs редактируются через `Redactor::redact_secrets` с фактическими секретами профиля;
-  - redactor теперь ловит `endpoint.password = ...` и JSON-подобные `client_random: ...`, а не только строки, начинающиеся с ключа.
-- Частично закрыты T-7/F-9:
-  - добавлены лимиты на импорт и state-файл;
-  - `validate_relative_path` блокирует Windows reserved device names (`CON`, `NUL`, `COM1`, `LPT1` и т.п.);
-  - TOML builder экранирует tabs и прочие control chars;
-  - `unique_profile_id` больше не использует бесконечный suffix loop.
-- Обновлен `.gitignore`:
-  - IDE/cache/temp/diagnostic artifacts;
-  - `LLM_Cloud/` как локальный аудит;
-  - `skills/`, `artifacts/`, `backups/`, Flutter/Rust/build мусор.
+- Read the local audit material from `LLM_Cloud`.
+- Hardened bundled TrustTunnel launch:
+  - removed broad CWD/parent-folder search for `trusttunnel_client.exe`;
+  - normal launch uses the fixed app-local bundle path;
+  - `trusttunnel_client.exe` and `wintun.dll` are checked by pinned SHA-256;
+  - `POH_TRUSTTUNNEL_CORE_PATH` is allowed only in dev/debug mode and still must match the pinned hash.
+- Updated `scripts/build-desktop.ps1` to copy bundled native runtime files beside the Flutter Windows app.
+- Moved new imported secrets to DPAPI-backed `ProtectedSecrets`.
+- Added migration from legacy plaintext `Secrets` to `ProtectedSecrets`.
+- Added restrictive Windows ACLs for state/runtime/config/session/log files.
+- Changed Flutter import flow so imported text goes through Rust stdin instead of a temporary file.
+- Added size limits for import input and desktop state.
+- Added import preview before save and explicit confirmation for high-risk TLS/LAN listener warnings.
+- Added persistent UI risk indicators for profiles with disabled TLS verification or custom certificate material.
+- Improved log redaction for `tt://`, password, client random, and known secret values.
+- Improved Windows process status/stop checks by parsing `tasklist` CSV and checking expected image name.
+- Hardened relative path validation against Windows reserved device names.
+- Updated `.gitignore` for IDE/cache/temp/build/audit artifacts.
 
-## Проверено
+## Modularity Phase A
+
+- Added `pinned_release` support to trusted sources.
+- Installable GitHub sources must now be active, checksum-required, and pinned.
+- Installed manifests are checked against owner/repo, source type, allowed asset pattern, pinned version, pinned asset, and pinned archive SHA.
+- Added `CoreStore::list_installed()`.
+- Added per-core `active.json`, `active_version()`, and `set_active_version()`.
+- Added CLI command `poh_cli core-list-installed`.
+- Added zip/multifile core install with:
+  - zip-slip guard;
+  - duplicate archive path rejection;
+  - empty archive rejection;
+  - Windows reserved device path rejection;
+  - installed file hash collection;
+  - tamper verification for installed files.
+- Added pinned GitHub downloader:
+  - no "latest release" lookup;
+  - no planned/unpinned source download;
+  - release asset URL is derived from trusted catalog data;
+  - artifact size is limited;
+  - SHA-256 is verified before install request creation.
+- Added CLI commands:
+  - `poh_cli core-download-plan <core-id>`;
+  - `poh_cli core-install <core-id> <executable-relative-path>`.
+- Rewrote `InfoProject.md` and `todone_arh.md` into clean ASCII documentation.
+
+## Verified
 
 - `cargo fmt --all`
 - `cargo test --workspace`
-- `flutter analyze` в `apps/desktop_flutter`
-- `scripts/check.ps1`
-- `scripts/build-desktop.ps1 -RustProfile debug`
-- Smoke test: `poh_cli.exe desktop-import-profile -` принимает импорт через stdin и возвращает security warnings. Тестовый профиль после проверки удален из локального state.
-- Smoke test: `poh_cli.exe desktop-preview-profile -` возвращает warnings без записи state.
-- Smoke test: импорт во временный `LOCALAPPDATA` пишет DPAPI `ProtectedSecrets`; plaintext secret в state не найден.
+- Previous pass also verified:
+  - `flutter analyze`
+  - `scripts/check.ps1`
+  - `scripts/build-desktop.ps1 -RustProfile debug`
+  - import/preview smoke through stdin and temporary `LOCALAPPDATA`
 
-## Осталось
+## Remaining
 
-- Уйти от `tasklist`/`taskkill` к долгоживущему session manager с handle процесса, если приложение станет daemon/service.
-- Перевести flat TOML parser и wildcard matching на проверенные crates (`toml`, `globset`) перед включением download/update UI.
-- Добавить `cargo audit` / `cargo deny` в CI после выбора политики зависимостей.
-- Добавить Authenticode/publisher validation для release-download ядер перед включением auto-install UI.
+- Add core store GC for old versions and rollback retention.
+- Add `SessionManager` with strict state transitions, single-instance lock, readiness probe, watchdog, stop timeout, and rollback hooks.
+- Add `CoreLaunchDescriptor` so per-core executable/config/log knowledge moves out of CLI arguments.
+- Move bundled TrustTunnel into managed core store layout.
+- Add NaiveProxy as the first downloadable optional module after a pinned release is selected.
+- Add signature/AuthentiCode or publisher validation before enabling automatic install/update UI.

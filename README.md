@@ -163,6 +163,7 @@ Implemented in the Rust + Flutter path:
 - Core store can list installed cores and track the active version per core.
 - Core store supports zip/multifile artifacts with zip-slip guards and installed file hashes.
 - Installable GitHub-release cores now require pinned release metadata before download UI can be enabled.
+- Rust downloader can plan and fetch only pinned GitHub release assets, then verify SHA-256 before install staging.
 
 Still in progress:
 
@@ -170,6 +171,7 @@ Still in progress:
 - Log streaming instead of manual refresh.
 - Full routing/profile editor migration from WPF to Flutter.
 - Trusted download/update UI for sing-box, NaiveProxy, Xray-core, and Hysteria2.
+- Core launch descriptors, so downloaded modules no longer need a manual executable path during CLI install.
 - Installer, tray behavior, and packaging.
 
 ## License

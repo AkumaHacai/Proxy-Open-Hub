@@ -14,7 +14,7 @@ use poh_core::{
 };
 use poh_core_runner::{MapSecretResolver, RuntimeMaterializer};
 use poh_core_session::{CoreLaunchSpec, CoreProcess};
-use poh_core_store::{CoreArtifact, CoreInstallRequest, CoreStore};
+use poh_core_store::{CoreArtifact, CoreDownloader, CoreInstallRequest, CoreStore};
 
 const MAX_DESKTOP_IMPORT_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -67,6 +67,8 @@ fn main() -> ExitCode {
             }
         }
         Some("core-list-installed") => core_list_installed(),
+        Some("core-download-plan") => core_download_plan(&args[1..]),
+        Some("core-install") => core_install(&args[1..]),
         Some("runtime-smoke") => runtime_smoke(),
         Some("store-smoke") => store_smoke(),
         Some("session-smoke") => session_smoke(),
@@ -80,7 +82,7 @@ fn main() -> ExitCode {
         Some(command) => {
             eprintln!("Unknown command: {command}");
             eprintln!(
-                "Usage: poh_cli [list|sources|core-list-installed|runtime-smoke|store-smoke|session-smoke|desktop-preview-profile <input-text-file|->|desktop-import-profile <input-text-file|->|desktop-session-plan <state-path> <profile-id>|desktop-session-start <state-path> <profile-id>|desktop-session-stop|desktop-session-status|desktop-session-log|detect <profile text>]"
+                "Usage: poh_cli [list|sources|core-list-installed|core-download-plan <core-id>|core-install <core-id> <executable-relative-path>|runtime-smoke|store-smoke|session-smoke|desktop-preview-profile <input-text-file|->|desktop-import-profile <input-text-file|->|desktop-session-plan <state-path> <profile-id>|desktop-session-start <state-path> <profile-id>|desktop-session-stop|desktop-session-status|desktop-session-log|detect <profile text>]"
             );
             ExitCode::from(2)
         }
@@ -95,6 +97,23 @@ fn print_manifests(registry: &CoreRegistry) {
             manifest.display_name, manifest.id, manifest.summary
         );
     }
+}
+
+fn load_trusted_sources() -> Result<Vec<TrustedCoreSource>, String> {
+    let json = include_str!("../../../core-registry/trusted-sources.json");
+    TrustedSourcePolicy::default()
+        .parse_sources(json)
+        .map_err(|error| error.to_string())
+}
+
+fn find_trusted_source<'a>(
+    sources: &'a [TrustedCoreSource],
+    core_id: &str,
+) -> Result<&'a TrustedCoreSource, String> {
+    sources
+        .iter()
+        .find(|source| source.core_id.as_str() == core_id)
+        .ok_or_else(|| format!("Unknown trusted core source: {core_id}"))
 }
 
 fn runtime_smoke() -> ExitCode {
@@ -195,6 +214,103 @@ fn core_list_installed() -> ExitCode {
         }
         Err(error) => {
             eprintln!("Core list failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn core_download_plan(args: &[String]) -> ExitCode {
+    let [core_id] = args else {
+        eprintln!("Usage: poh_cli core-download-plan <core-id>");
+        return ExitCode::from(2);
+    };
+
+    let sources = match load_trusted_sources() {
+        Ok(sources) => sources,
+        Err(error) => {
+            eprintln!("Trusted source policy failed: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let source = match find_trusted_source(&sources, core_id) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match CoreDownloader::plan(source) {
+        Ok(plan) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&plan).expect("download plan should serialize")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Core download plan failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn core_install(args: &[String]) -> ExitCode {
+    let [core_id, executable_relative_path] = args else {
+        eprintln!("Usage: poh_cli core-install <core-id> <executable-relative-path>");
+        return ExitCode::from(2);
+    };
+
+    let sources = match load_trusted_sources() {
+        Ok(sources) => sources,
+        Err(error) => {
+            eprintln!("Trusted source policy failed: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let source = match find_trusted_source(&sources, core_id) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let downloaded = match CoreDownloader::default().download(source) {
+        Ok(downloaded) => downloaded,
+        Err(error) => {
+            eprintln!("Core download failed: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let request =
+        match downloaded.into_install_request(source, executable_relative_path, now_unix_ms()) {
+            Ok(request) => request,
+            Err(error) => {
+                eprintln!("Core install request failed: {error}");
+                return ExitCode::from(1);
+            }
+        };
+
+    let store = CoreStore::new(local_core_store_root());
+    match store.install(&request, &sources) {
+        Ok(result) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "core_id": result.manifest.core_id,
+                    "version": result.manifest.version,
+                    "asset_name": result.manifest.asset_name,
+                    "install_dir": result.install_dir,
+                    "executable_path": result.executable_path,
+                    "files": result.manifest.files,
+                }))
+                .expect("install result should serialize")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Core install failed: {error}");
             ExitCode::from(1)
         }
     }

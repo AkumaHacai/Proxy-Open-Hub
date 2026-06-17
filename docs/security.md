@@ -20,6 +20,7 @@ Implemented guardrails:
 - Trusted core sources are locked by default. A GitHub-release core can become installable only when it is active, uses an approved source type, requires checksum verification, and declares a `pinned_release`.
 - Installed core manifests are checked against trusted sources, pinned release metadata, allowed asset patterns, executable paths, and SHA-256 digests. This is the first barrier against fake or swapped core binaries.
 - Zip/multifile core artifacts are extracted only through the core store. Each archive entry passes path validation, duplicate paths are rejected, and installed file hashes are recorded for later tamper checks.
+- Downloadable cores are fetched only from the pinned GitHub release asset URL derived from the trusted catalog. The downloader enforces an artifact size limit and verifies SHA-256 before the bytes can become an install request.
 - Bundled TrustTunnel is launched only from the fixed app-local `native/bundled/win-x64` path and is checked against pinned SHA-256 digests before every start.
 - Import from Flutter is passed to Rust through stdin, so `tt://` payloads are no longer written to a temporary import file.
 - Imported profile secrets are stored in `ProtectedSecrets` using Windows DPAPI. Legacy plaintext `Secrets` are migrated on load.

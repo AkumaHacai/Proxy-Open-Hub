@@ -1,15 +1,17 @@
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{self, Cursor};
+use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use poh_core::{
     sha256_hex, CoreId, InstalledCoreFile, InstalledCoreManifest, InstalledCorePolicy,
-    SecurityError, TrustedCoreSource,
+    SecurityError, SignatureStatus, SourceType, TrustedCoreSource, TrustedSourcePolicy,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zip::ZipArchive;
+
+pub const DEFAULT_MAX_CORE_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreArtifact {
@@ -40,6 +42,177 @@ impl CoreArtifact {
 pub enum CoreArtifactFormat {
     SingleFile,
     ZipArchive,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CoreDownloadPlan {
+    pub core_id: CoreId,
+    pub version: String,
+    pub asset_name: String,
+    pub sha256: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DownloadedCoreArtifact {
+    pub plan: CoreDownloadPlan,
+    pub bytes: Vec<u8>,
+}
+
+impl DownloadedCoreArtifact {
+    pub fn into_install_request(
+        self,
+        source: &TrustedCoreSource,
+        executable_relative_path: impl Into<String>,
+        installed_at_unix_ms: u64,
+    ) -> Result<CoreInstallRequest, CoreStoreError> {
+        if source.core_id != self.plan.core_id {
+            return Err(CoreStoreError::ManifestMismatch(format!(
+                "{} download does not belong to {}",
+                self.plan.core_id, source.core_id
+            )));
+        }
+
+        let executable_relative_path = executable_relative_path.into();
+        validate_relative_path(&executable_relative_path)?;
+        let manifest = InstalledCoreManifest {
+            core_id: source.core_id.clone(),
+            display_name: source.display_name.clone(),
+            version: self.plan.version.clone(),
+            source_type: source.source_type.clone(),
+            owner: source.owner.clone(),
+            repo: source.repo.clone(),
+            asset_name: self.plan.asset_name.clone(),
+            executable_path: executable_relative_path.clone(),
+            sha256: self.plan.sha256.clone(),
+            signature_status: SignatureStatus::Unknown,
+            installed_at_unix_ms,
+            files: Vec::new(),
+        };
+        let artifact = if self.plan.asset_name.to_ascii_lowercase().ends_with(".zip") {
+            CoreArtifact::zip_archive(self.bytes, executable_relative_path)
+        } else {
+            CoreArtifact::single_file(self.bytes, executable_relative_path)
+        };
+
+        Ok(CoreInstallRequest { manifest, artifact })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreDownloader {
+    max_bytes: u64,
+    user_agent: String,
+}
+
+impl Default for CoreDownloader {
+    fn default() -> Self {
+        Self {
+            max_bytes: DEFAULT_MAX_CORE_DOWNLOAD_BYTES,
+            user_agent: "ProxyOpenHub/0.1 core-downloader".to_string(),
+        }
+    }
+}
+
+impl CoreDownloader {
+    pub fn with_limits(max_bytes: u64, user_agent: impl Into<String>) -> Self {
+        Self {
+            max_bytes,
+            user_agent: user_agent.into(),
+        }
+    }
+
+    pub fn plan(source: &TrustedCoreSource) -> Result<CoreDownloadPlan, CoreStoreError> {
+        TrustedSourcePolicy::default().validate_sources(std::slice::from_ref(source))?;
+        if source.source_type != SourceType::GithubRelease {
+            return Err(CoreStoreError::DownloadUnavailable(format!(
+                "{} is not a GitHub release source",
+                source.core_id
+            )));
+        }
+
+        if !source.is_installable() {
+            return Err(CoreStoreError::DownloadUnavailable(format!(
+                "{} is not installable yet",
+                source.core_id
+            )));
+        }
+
+        let pinned = source.pinned_release.as_ref().ok_or_else(|| {
+            CoreStoreError::DownloadUnavailable(format!("{} has no pinned release", source.core_id))
+        })?;
+        let owner = source.owner.as_deref().ok_or_else(|| {
+            CoreStoreError::DownloadUnavailable(format!("{} has no owner", source.core_id))
+        })?;
+        let repo = source.repo.as_deref().ok_or_else(|| {
+            CoreStoreError::DownloadUnavailable(format!("{} has no repo", source.core_id))
+        })?;
+
+        Ok(CoreDownloadPlan {
+            core_id: source.core_id.clone(),
+            version: pinned.version.clone(),
+            asset_name: pinned.asset_name.clone(),
+            sha256: pinned.sha256.clone(),
+            url: github_release_asset_url(owner, repo, &pinned.version, &pinned.asset_name),
+        })
+    }
+
+    pub fn artifact_from_bytes(
+        source: &TrustedCoreSource,
+        bytes: Vec<u8>,
+    ) -> Result<DownloadedCoreArtifact, CoreStoreError> {
+        let plan = Self::plan(source)?;
+        let actual = sha256_hex(&bytes);
+        if !actual.eq_ignore_ascii_case(&plan.sha256) {
+            return Err(CoreStoreError::Security(SecurityError::ChecksumMismatch(
+                format!(
+                    "{} expected {}, got {}",
+                    plan.asset_name, plan.sha256, actual
+                ),
+            )));
+        }
+
+        Ok(DownloadedCoreArtifact { plan, bytes })
+    }
+
+    pub fn download(
+        &self,
+        source: &TrustedCoreSource,
+    ) -> Result<DownloadedCoreArtifact, CoreStoreError> {
+        let plan = Self::plan(source)?;
+        let response = ureq::get(&plan.url)
+            .set("User-Agent", &self.user_agent)
+            .call()
+            .map_err(|error| CoreStoreError::Download(error.to_string()))?;
+
+        if response
+            .header("Content-Length")
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|content_length| content_length > self.max_bytes)
+        {
+            return Err(CoreStoreError::DownloadTooLarge {
+                bytes: response
+                    .header("Content-Length")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or_default(),
+                limit: self.max_bytes,
+            });
+        }
+
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .take(self.max_bytes + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > self.max_bytes {
+            return Err(CoreStoreError::DownloadTooLarge {
+                bytes: bytes.len() as u64,
+                limit: self.max_bytes,
+            });
+        }
+
+        Self::artifact_from_bytes(source, bytes)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -473,10 +646,37 @@ fn relative_path_string(root: &Path, path: &Path) -> Result<String, CoreStoreErr
     Ok(value)
 }
 
+fn github_release_asset_url(owner: &str, repo: &str, version: &str, asset_name: &str) -> String {
+    format!(
+        "https://github.com/{owner}/{repo}/releases/download/{}/{}",
+        percent_encode_path_segment(version),
+        percent_encode_path_segment(asset_name)
+    )
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+
+    encoded
+}
+
 #[derive(Debug, Error)]
 pub enum CoreStoreError {
     #[error(transparent)]
     Security(#[from] SecurityError),
+    #[error("core source cannot be downloaded: {0}")]
+    DownloadUnavailable(String),
+    #[error("core download failed: {0}")]
+    Download(String),
+    #[error("core download is too large: {bytes} bytes (limit: {limit})")]
+    DownloadTooLarge { bytes: u64, limit: u64 },
     #[error("manifest mismatch: {0}")]
     ManifestMismatch(String),
     #[error("unsafe path: {0}")]
@@ -822,6 +1022,112 @@ mod tests {
         if root.exists() {
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn downloader_builds_pinned_github_plan() {
+        let manifest = InstalledCoreManifest {
+            core_id: CoreId::from("sing-box"),
+            display_name: "sing-box".to_string(),
+            version: "v1.0.0".to_string(),
+            source_type: SourceType::GithubRelease,
+            owner: Some("SagerNet".to_string()),
+            repo: Some("sing-box".to_string()),
+            asset_name: "sing-box 1.0.0 windows amd64.zip".to_string(),
+            executable_path: "sing-box.exe".to_string(),
+            sha256: sha256_hex(b"archive"),
+            signature_status: SignatureStatus::Unknown,
+            installed_at_unix_ms: 1,
+            files: Vec::new(),
+        };
+        let mut source = trusted_sources_for(&manifest).remove(0);
+        source.allowed_asset_patterns = vec!["sing-box * windows amd64.zip".to_string()];
+
+        let plan = CoreDownloader::plan(&source).unwrap();
+
+        assert_eq!(plan.core_id, CoreId::from("sing-box"));
+        assert_eq!(plan.version, "v1.0.0");
+        assert_eq!(
+            plan.url,
+            "https://github.com/SagerNet/sing-box/releases/download/v1.0.0/sing-box%201.0.0%20windows%20amd64.zip"
+        );
+    }
+
+    #[test]
+    fn downloader_rejects_non_installable_source() {
+        let manifest = InstalledCoreManifest {
+            core_id: CoreId::from("sing-box"),
+            display_name: "sing-box".to_string(),
+            version: "1.0.0".to_string(),
+            source_type: SourceType::GithubRelease,
+            owner: Some("SagerNet".to_string()),
+            repo: Some("sing-box".to_string()),
+            asset_name: "sing-box-1.0.0-windows-amd64.zip".to_string(),
+            executable_path: "sing-box.exe".to_string(),
+            sha256: sha256_hex(b"archive"),
+            signature_status: SignatureStatus::Unknown,
+            installed_at_unix_ms: 1,
+            files: Vec::new(),
+        };
+        let mut source = trusted_sources_for(&manifest).remove(0);
+        source.status = SourceStatus::Planned;
+        source.install_enabled = false;
+
+        let error = CoreDownloader::plan(&source).unwrap_err();
+
+        assert!(matches!(error, CoreStoreError::DownloadUnavailable(_)));
+    }
+
+    #[test]
+    fn downloader_verifies_pinned_bytes_before_install_request() {
+        let archive = zip_bytes(&[("bin/sing-box.exe", b"trusted-core-binary".as_slice())]);
+        let manifest = InstalledCoreManifest {
+            core_id: CoreId::from("sing-box"),
+            display_name: "sing-box".to_string(),
+            version: "1.0.0".to_string(),
+            source_type: SourceType::GithubRelease,
+            owner: Some("SagerNet".to_string()),
+            repo: Some("sing-box".to_string()),
+            asset_name: "sing-box-1.0.0-windows-amd64.zip".to_string(),
+            executable_path: "bin/sing-box.exe".to_string(),
+            sha256: sha256_hex(&archive),
+            signature_status: SignatureStatus::Unknown,
+            installed_at_unix_ms: 1,
+            files: Vec::new(),
+        };
+        let source = trusted_sources_for(&manifest).remove(0);
+
+        let downloaded = CoreDownloader::artifact_from_bytes(&source, archive).unwrap();
+        let request = downloaded
+            .into_install_request(&source, "bin/sing-box.exe", 10)
+            .unwrap();
+
+        assert_eq!(request.manifest.version, "1.0.0");
+        assert_eq!(request.manifest.sha256, manifest.sha256);
+        assert_eq!(request.artifact.format, CoreArtifactFormat::ZipArchive);
+    }
+
+    #[test]
+    fn downloader_rejects_checksum_mismatch() {
+        let manifest = InstalledCoreManifest {
+            core_id: CoreId::from("sing-box"),
+            display_name: "sing-box".to_string(),
+            version: "1.0.0".to_string(),
+            source_type: SourceType::GithubRelease,
+            owner: Some("SagerNet".to_string()),
+            repo: Some("sing-box".to_string()),
+            asset_name: "sing-box-1.0.0-windows-amd64.zip".to_string(),
+            executable_path: "sing-box.exe".to_string(),
+            sha256: sha256_hex(b"expected"),
+            signature_status: SignatureStatus::Unknown,
+            installed_at_unix_ms: 1,
+            files: Vec::new(),
+        };
+        let source = trusted_sources_for(&manifest).remove(0);
+
+        let error = CoreDownloader::artifact_from_bytes(&source, b"actual".to_vec()).unwrap_err();
+
+        assert!(matches!(error, CoreStoreError::Security(_)));
     }
 
     fn trusted_sources() -> Vec<TrustedCoreSource> {
