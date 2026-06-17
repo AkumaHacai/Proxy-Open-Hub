@@ -2,70 +2,173 @@
 
 ![Proxy Open Hub logo](logo/proxy-open-hub-horizontal.svg)
 
-Proxy Open Hub is a Windows desktop proxy/VPN hub built with WPF and .NET. The current working core is the official TrustTunnel Windows core, and the UI is being prepared for optional cores such as sing-box, NaiveProxy, Xray-core, and Hysteria2.
+Proxy Open Hub is a modular Windows proxy/VPN hub. The active migration target is:
 
-The project is not the official TrustTunnel client. It is an independent desktop shell that imports profiles, stores typed settings, generates TrustTunnel TOML, and launches the bundled/installed native core.
+- Rust backend for core adapters, trusted sources, config materialization, process lifecycle, secrets, logs, and security checks.
+- Flutter desktop UI for the main client, settings, logs, and future per-core screens.
+- Bundled TrustTunnel CLI core as the first working runtime.
+
+The project is not the official TrustTunnel client. It is an independent desktop shell that currently supports TrustTunnel profiles and is being prepared for optional cores such as sing-box, NaiveProxy, Xray-core, and Hysteria2.
+
+## Active Project Layout
+
+These are the folders you usually need:
+
+```text
+Cargo.toml                         Rust workspace root
+crates/                            Rust backend crates
+  poh_cli/                         CLI bridge used by Flutter
+  poh_core/                        Core adapters, TrustTunnel parser/builder, security policy
+  poh_core_runner/                 Runtime config materialization
+  poh_core_session/                Process launch helpers
+  poh_core_store/                  Trusted core install/verify store
+apps/desktop_flutter/              Flutter desktop application
+core-registry/trusted-sources.json Trusted core source registry
+native/bundled/win-x64/            Bundled TrustTunnel runtime files
+logo/                              Source logo assets
+docs/                              Migration/security/native notes
+backups/Old Files/                 Old WPF app, HTML references, archived duplicates
+```
+
+The old WPF/.NET project and HTML references were moved to:
+
+```text
+backups/Old Files/2026-06-16-wpf-and-references/
+```
+
+`.vs/` may remain in the root if Visual Studio has it locked. It is local IDE cache, not part of the active app.
+
+## Quick Start
+
+From the repository root:
+
+```powershell
+.\scripts\check.ps1
+.\scripts\build-desktop.ps1
+.\scripts\run-desktop.ps1
+```
+
+`build-desktop.ps1` builds both layers and copies `poh_cli.exe` beside the
+Flutter executable so the Connect button can find the Rust backend.
+
+## Built EXE
+
+After a Flutter Windows build, run:
+
+```text
+apps/desktop_flutter/build/windows/x64/runner/Release/proxy_open_hub.exe
+```
+
+The Rust helper CLI is:
+
+```text
+target/debug/poh_cli.exe
+```
+
+The build script also copies it here:
+
+```text
+apps/desktop_flutter/build/windows/x64/runner/Release/poh_cli.exe
+```
+
+Flutter finds `poh_cli.exe` beside the app or by walking parent folders. You can override it:
+
+```powershell
+$env:POH_CLI_PATH = "C:\Users\mirot\Documents\TT gui\target\debug\poh_cli.exe"
+```
+
+TrustTunnel bundled runtime is expected here:
+
+```text
+native/bundled/win-x64/trusttunnel_client.exe
+native/bundled/win-x64/wintun.dll
+```
+
+For local debugging only, you can override the core path. This is blocked in normal runs; set `POH_DEV=1` or use a debug build, and the binary still has to match the pinned bundled SHA-256:
+
+```powershell
+$env:POH_TRUSTTUNNEL_CORE_PATH = "C:\path\to\trusttunnel_client.exe"
+```
+
+## Build And Check
+
+Rust backend:
+
+```powershell
+C:\Users\mirot\.cargo\bin\cargo.exe fmt --all --check
+C:\Users\mirot\.cargo\bin\cargo.exe test --workspace
+C:\Users\mirot\.cargo\bin\cargo.exe build -p poh_cli
+```
+
+Flutter UI:
+
+```powershell
+cd .\apps\desktop_flutter
+C:\Users\mirot\devtools\flutter\bin\flutter.bat analyze
+C:\Users\mirot\devtools\flutter\bin\flutter.bat test
+C:\Users\mirot\devtools\flutter\bin\flutter.bat build windows
+```
+
+Combined scripts:
+
+```powershell
+.\scripts\check.ps1
+.\scripts\build-desktop.ps1
+.\scripts\run-desktop.ps1 -Build
+```
+
+Quick backend session commands:
+
+```powershell
+.\target\debug\poh_cli.exe desktop-session-status
+.\target\debug\poh_cli.exe desktop-session-log
+```
+
+Quick TrustTunnel import command:
+
+```powershell
+.\target\debug\poh_cli.exe desktop-import-profile C:\path\to\profile.toml
+```
+
+The Flutter Add Server button uses the same command through the bundled
+`poh_cli.exe` and writes `%LOCALAPPDATA%\ProxyOpenHub\desktop-state.json`.
+
+`desktop-session-start` starts the real TrustTunnel core. Use it only when you are ready for a real local SOCKS/TUN runtime:
+
+```powershell
+.\target\debug\poh_cli.exe desktop-session-start <desktop-state.json> <profile-id>
+.\target\debug\poh_cli.exe desktop-session-stop
+```
 
 ## Current Status
 
-Alpha. The main TrustTunnel workflow is usable, but the project still needs hardening before a public stable release:
+Implemented in the Rust + Flutter path:
 
-- stronger persistent secret storage through Windows Credential Manager or DPAPI;
-- signed installer/update flow;
-- full manual QA for TUN, SOCKS5, HTTP proxy, service mode, tray behavior, and system proxy behavior;
-- trusted download/install flow for optional future cores;
-- broader UI translation review for Russian, English, Chinese, and Persian.
+- Real saved-profile loading from `desktop-state.json`.
+- TrustTunnel TOML session materialization with real saved secrets.
+- Redacted runtime preview and logs.
+- Real `trusttunnel_client.exe` start/stop/status lifecycle through Rust CLI.
+- Flutter main UI with compact/expanded modes.
+- Flutter settings shell wired into the main UI.
+- Flutter logs shell wired into the main UI.
+- Flutter Add Server import shell wired into the main UI.
+- TrustTunnel TOML/tt-link import into `%LOCALAPPDATA%\ProxyOpenHub\desktop-state.json`.
+- TOML parser handles UTF-8 BOM files from Windows editors.
+- Persistent app settings saved to `%LOCALAPPDATA%\ProxyOpenHub\app-settings.json`.
+- Live network metrics service based on OS counters while connected.
+- Combined PowerShell build/check/run scripts for the Rust + Flutter app.
+- Trusted-source registry scaffold for future optional cores.
 
-## Implemented
+Still in progress:
 
-- Modern WPF interface with expanded and compact modes.
-- Proxy Open Hub application icon, taskbar icon, tray icon, and branded logo assets.
-- Tray behavior: close button hides the window, tray menu can reopen or exit.
-- `tt://?...` TrustTunnel profile import.
-- TOML import, TOML editor, copy/save workflow with sensitive-data preview toggle.
-- Manual server creation.
-- Typed config model for endpoint, listener, TUN, SOCKS5, routing, server profiles, and app settings.
-- Routing profiles with simple presets for local network and RU bypass rules.
-- Validators for host:port, DNS upstreams, CIDR routes, exclusions, MTU, and unsafe certificate settings.
-- Secret store abstraction; current desktop implementation keeps MVP secrets in the local app state.
-- SOCKS5 credentials are generated automatically when missing.
-- System proxy toggle for SOCKS5 profiles.
-- Connection state machine and redacted logs.
-- Live network metrics from OS counters while connected.
-- Server diagnostics for native files, TUN prerequisites, ping, and HTTPS access checks.
-- Localization: English, Russian, Chinese, Persian, with system-language default on first launch.
-- Native runtime loader for `vpn_easy.dll`, service mode via `vpn_easy_service.exe`, and CLI fallback via `trusttunnel_client.exe`.
-
-## Native Core Files
-
-Official native files can be placed in `native/bundled/win-x64` or copied next to the built desktop executable.
-
-Preferred ABI integration:
-
-- `vpn_easy.dll`
-- `wintun.dll` for TUN mode
-- `vpn_easy_service.exe` for service mode
-
-Release-package CLI fallback:
-
-- `trusttunnel_client.exe`
-- `wintun.dll` for TUN mode
-
-More details: `docs/native-core-integration.md`.
-
-## Commands
-
-```powershell
-dotnet restore --configfile .\NuGet.Config
-dotnet build .\TrustTunnelGuiClient.sln --no-restore
-dotnet run --project .\tests\TrustTunnel.Tests\TrustTunnel.Tests.csproj --no-build
-dotnet format .\TrustTunnelGuiClient.sln --verify-no-changes --no-restore
-```
-
-The desktop binary is emitted as `ProxyOpenHub.exe`.
+- Exact TrustTunnel/Wintun adapter matching for live traffic.
+- Log streaming instead of manual refresh.
+- Full routing/profile editor migration from WPF to Flutter.
+- Trusted download/update UI for sing-box, NaiveProxy, Xray-core, and Hysteria2.
+- Installer, tray behavior, and packaging.
 
 ## License
 
 Proxy Open Hub source code is licensed under the Apache License 2.0. See `LICENSE.txt`.
 
-Bundled native components and future downloadable cores keep their own licenses. See `NOTICE.md` and the license files shipped beside each native binary.
+Bundled native components and future downloadable cores keep their own licenses. See `NOTICE.md` and license files shipped beside each native binary.

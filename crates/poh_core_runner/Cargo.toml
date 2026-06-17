@@ -1,0 +1,10 @@
+[package]
+name = "poh_core_runner"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+poh_core = { path = "../poh_core" }
+thiserror.workspace = true

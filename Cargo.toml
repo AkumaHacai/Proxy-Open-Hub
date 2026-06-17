@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/poh_core",
+    "crates/poh_core_runner",
+    "crates/poh_core_store",
+    "crates/poh_core_session",
+    "crates/poh_cli",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/AkumaHacai/TT-gui"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+base64 = "0.22"
+sha2 = "0.10"

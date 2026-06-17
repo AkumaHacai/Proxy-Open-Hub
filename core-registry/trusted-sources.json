@@ -1,0 +1,83 @@
+[
+  {
+    "core_id": "trusttunnel",
+    "display_name": "TrustTunnel",
+    "source_type": "manual_bundle",
+    "status": "active",
+    "homepage": null,
+    "license": "upstream license, see bundled NOTICE files",
+    "install_enabled": false,
+    "checksum_required": false,
+    "signature_preferred": false,
+    "allowed_asset_patterns": [],
+    "notes": "The current alpha uses manually bundled TrustTunnel/vpn_easy files. A pinned official release source must be added before automatic downloads are enabled."
+  },
+  {
+    "core_id": "sing-box",
+    "display_name": "sing-box",
+    "source_type": "github_release",
+    "status": "planned",
+    "owner": "SagerNet",
+    "repo": "sing-box",
+    "homepage": "https://sing-box.sagernet.org/",
+    "license": "GPL-3.0-or-later",
+    "install_enabled": false,
+    "checksum_required": true,
+    "signature_preferred": true,
+    "allowed_asset_patterns": [
+      "sing-box-*-windows-amd64.zip"
+    ],
+    "notes": "Planned optional core. Settings appear only after installation."
+  },
+  {
+    "core_id": "naiveproxy",
+    "display_name": "NaiveProxy",
+    "source_type": "github_release",
+    "status": "planned",
+    "owner": "klzgrad",
+    "repo": "naiveproxy",
+    "homepage": "https://github.com/klzgrad/naiveproxy",
+    "license": "BSD-3-Clause",
+    "install_enabled": false,
+    "checksum_required": true,
+    "signature_preferred": true,
+    "allowed_asset_patterns": [
+      "naiveproxy-*-win-x64.zip"
+    ],
+    "notes": "Planned optional core. Settings appear only after installation."
+  },
+  {
+    "core_id": "xray-core",
+    "display_name": "Xray-core",
+    "source_type": "github_release",
+    "status": "planned",
+    "owner": "XTLS",
+    "repo": "Xray-core",
+    "homepage": "https://github.com/XTLS/Xray-core",
+    "license": "MPL-2.0",
+    "install_enabled": false,
+    "checksum_required": true,
+    "signature_preferred": true,
+    "allowed_asset_patterns": [
+      "Xray-windows-64.zip"
+    ],
+    "notes": "Planned optional core. Settings appear only after installation."
+  },
+  {
+    "core_id": "hysteria2",
+    "display_name": "Hysteria2",
+    "source_type": "github_release",
+    "status": "planned",
+    "owner": "apernet",
+    "repo": "hysteria",
+    "homepage": "https://v2.hysteria.network/",
+    "license": "MIT",
+    "install_enabled": false,
+    "checksum_required": true,
+    "signature_preferred": true,
+    "allowed_asset_patterns": [
+      "hysteria-windows-amd64.exe"
+    ],
+    "notes": "Planned optional core. Settings appear only after installation."
+  }
+]

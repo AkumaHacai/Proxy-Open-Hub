@@ -58,6 +58,9 @@ dkms.conf
 # Visual Studio Specific
 # ==========================================
 .vs/
+.vscode/
+.idea/
+*.iml
 [Bb]in/
 [Oo]bj/
 *.suo
@@ -71,12 +74,47 @@ dkms.conf
 [Rr]elease/
 x64/
 x86/
+target/
 
 # Local UI verification screenshots
 artifacts/
+backups/
+LLM_Cloud/
+skills/
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+coverage/
 
 # Upgrade Log files
 Backup/
 UpgradeLog*.XML
 UpgradeLog*.htm
+
+# Local secrets, diagnostics and generated packages
+.env
+.env.*
+*.local
+*.log
+*.tmp
+*.temp
+*.bak
+*.cache
+*.db
+*.sqlite
+*.sqlite3
+*.zip
+*.7z
+*.rar
+*.msi
+*.nupkg
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
 
