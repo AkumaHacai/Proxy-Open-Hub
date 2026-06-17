@@ -1,6 +1,7 @@
 use std::env;
 use std::fs::File;
 use std::io::{self, Read};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,8 +9,8 @@ mod desktop_state;
 
 use poh_core::{
     sha256_hex, CoreAdapter, CoreId, CoreRegistry, ImportInput, InstalledCoreManifest,
-    SignatureStatus, SourceStatus, SourceType, TrustTunnelAdapter, TrustedCoreSource,
-    TrustedSourcePolicy,
+    PinnedRelease, SignatureStatus, SourceStatus, SourceType, TrustTunnelAdapter,
+    TrustedCoreSource, TrustedSourcePolicy,
 };
 use poh_core_runner::{MapSecretResolver, RuntimeMaterializer};
 use poh_core_session::{CoreLaunchSpec, CoreProcess};
@@ -65,6 +66,7 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("core-list-installed") => core_list_installed(),
         Some("runtime-smoke") => runtime_smoke(),
         Some("store-smoke") => store_smoke(),
         Some("session-smoke") => session_smoke(),
@@ -78,7 +80,7 @@ fn main() -> ExitCode {
         Some(command) => {
             eprintln!("Unknown command: {command}");
             eprintln!(
-                "Usage: poh_cli [list|sources|runtime-smoke|store-smoke|session-smoke|desktop-preview-profile <input-text-file|->|desktop-import-profile <input-text-file|->|desktop-session-plan <state-path> <profile-id>|desktop-session-start <state-path> <profile-id>|desktop-session-stop|desktop-session-status|desktop-session-log|detect <profile text>]"
+                "Usage: poh_cli [list|sources|core-list-installed|runtime-smoke|store-smoke|session-smoke|desktop-preview-profile <input-text-file|->|desktop-import-profile <input-text-file|->|desktop-session-plan <state-path> <profile-id>|desktop-session-start <state-path> <profile-id>|desktop-session-stop|desktop-session-status|desktop-session-log|detect <profile text>]"
             );
             ExitCode::from(2)
         }
@@ -164,7 +166,7 @@ fn store_smoke() -> ExitCode {
     };
     let root = env::temp_dir().join(format!("poh-store-smoke-{}", now_unix_ms()));
     let store = CoreStore::new(&root);
-    match store.install(&request, &smoke_sources()) {
+    match store.install(&request, &smoke_sources_for(&request.manifest)) {
         Ok(result) => {
             println!("Installed {}", result.executable_path.display());
             if let Err(error) = std::fs::remove_dir_all(&root) {
@@ -177,6 +179,24 @@ fn store_smoke() -> ExitCode {
             if root.exists() {
                 let _ = std::fs::remove_dir_all(&root);
             }
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn core_list_installed() -> ExitCode {
+    let store = CoreStore::new(local_core_store_root());
+    match store.list_installed() {
+        Ok(installed) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&installed)
+                    .expect("installed core list should serialize")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Core list failed: {error}");
             ExitCode::from(1)
         }
     }
@@ -213,11 +233,12 @@ fn session_smoke() -> ExitCode {
     let root = env::temp_dir().join(format!("poh-session-smoke-{}", now_unix_ms()));
     let store = CoreStore::new(&root);
     let result = (|| {
-        store.install(&request, &smoke_sources())?;
+        let trusted_sources = smoke_sources_for(&request.manifest);
+        store.install(&request, &trusted_sources)?;
         let verified = store.verify_core(
             &CoreId::from("sing-box"),
             "0.0.1-session-smoke",
-            &smoke_sources(),
+            &trusted_sources,
         )?;
         let runtime = poh_core_runner::MaterializedRuntime {
             files: Vec::new(),
@@ -438,7 +459,7 @@ fn desktop_session_log() -> ExitCode {
     }
 }
 
-fn smoke_sources() -> Vec<TrustedCoreSource> {
+fn smoke_sources_for(manifest: &InstalledCoreManifest) -> Vec<TrustedCoreSource> {
     vec![TrustedCoreSource {
         core_id: CoreId::from("sing-box"),
         display_name: "sing-box".to_string(),
@@ -452,8 +473,22 @@ fn smoke_sources() -> Vec<TrustedCoreSource> {
         checksum_required: true,
         signature_preferred: true,
         allowed_asset_patterns: vec!["sing-box-*-windows-amd64.zip".to_string()],
+        pinned_release: Some(PinnedRelease {
+            version: manifest.version.clone(),
+            asset_name: manifest.asset_name.clone(),
+            sha256: manifest.sha256.clone(),
+            min_app_version: None,
+        }),
         notes: None,
     }]
+}
+
+fn local_core_store_root() -> PathBuf {
+    env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir)
+        .join("ProxyOpenHub")
+        .join("cores")
 }
 
 fn now_unix_ms() -> u64 {

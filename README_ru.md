@@ -72,6 +72,8 @@ $env:POH_TRUSTTUNNEL_CORE_PATH = "C:\path\to\trusttunnel_client.exe"
 - Settings shell, logs shell и import shell в Flutter.
 - Live network metrics по OS counters.
 - Реестр доверенных источников для будущих optional-ядер.
+- Core store умеет выводить установленные ядра и хранить active version на каждое ядро.
+- Для включения download UI GitHub-release ядра теперь обязаны иметь `pinned_release`.
 - Security hardening: pinned bundled core hash, DPAPI `ProtectedSecrets`, stdin import, runtime cleanup, restrictive ACL, PID identity check, pre-save warning'и для insecure TLS и LAN listener, редакция логов по значениям секретов.
 
 ## Что еще в работе

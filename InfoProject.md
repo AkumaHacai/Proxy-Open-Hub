@@ -67,10 +67,12 @@ scripts/run-desktop.ps1            run built app with POH_CLI_PATH
 Что уже заложено:
 
 - Trusted source registry.
-- Проверка source type, owner/repo, asset pattern.
+- Проверка source type, owner/repo, asset pattern и `pinned_release`.
 - SHA-256 validation.
 - Запрет path traversal при распаковке/установке.
 - Проверка установленного executable на tampering.
+- Список установленных версий через `CoreStore::list_installed()`.
+- Active version на ядро через `active.json`.
 
 Пока install/download UI не включен в приложение. Это следующий крупный этап.
 
@@ -217,6 +219,8 @@ apps/desktop_flutter/build/windows/x64/runner/Release/poh_cli.exe
 - Live metrics читаются через OS network counters.
 - Настройки приложения сохраняются в `%LOCALAPPDATA%\ProxyOpenHub\app-settings.json`.
 - Trusted-source registry и проверки fake/tampered core artifacts заложены для будущих ядер.
+- GitHub-release ядра требуют `pinned_release` перед включением install flow.
+- Core store умеет хранить active version и выводить installed cores через CLI.
 - Секреты профилей хранятся как DPAPI `ProtectedSecrets`.
 - Import preview показывает TLS/LAN warnings до сохранения и требует подтверждение.
 

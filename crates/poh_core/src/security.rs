@@ -24,6 +24,14 @@ pub enum SourceStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PinnedRelease {
+    pub version: String,
+    pub asset_name: String,
+    pub sha256: String,
+    pub min_app_version: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TrustedCoreSource {
     pub core_id: CoreId,
     pub display_name: String,
@@ -41,6 +49,8 @@ pub struct TrustedCoreSource {
     pub signature_preferred: bool,
     #[serde(default)]
     pub allowed_asset_patterns: Vec<String>,
+    #[serde(default)]
+    pub pinned_release: Option<PinnedRelease>,
     pub notes: Option<String>,
 }
 
@@ -127,6 +137,18 @@ impl InstalledCorePolicy {
 
                 if source.checksum_required {
                     validate_sha256_hex(&manifest.sha256)?;
+                }
+
+                if let Some(pinned) = &source.pinned_release {
+                    if manifest.version != pinned.version
+                        || manifest.asset_name != pinned.asset_name
+                        || !manifest.sha256.eq_ignore_ascii_case(&pinned.sha256)
+                    {
+                        return Err(SecurityError::UntrustedInstalledCore(format!(
+                            "{} does not match pinned release",
+                            manifest.core_id
+                        )));
+                    }
                 }
             }
         }
@@ -216,6 +238,13 @@ impl TrustedSourcePolicy {
 
             match source.source_type {
                 SourceType::ManualBundle => {
+                    if source.pinned_release.is_some() {
+                        return Err(SecurityError::InvalidTrustedSource(format!(
+                            "{} manual bundle cannot use pinned_release",
+                            source.core_id
+                        )));
+                    }
+
                     if source.install_enabled {
                         return Err(SecurityError::InvalidTrustedSource(format!(
                             "{} is a manual bundle and cannot be auto-installed",
@@ -236,6 +265,15 @@ impl TrustedSourcePolicy {
                             source.core_id
                         )));
                     }
+
+                    if let Some(pinned) = &source.pinned_release {
+                        validate_pinned_release(source, pinned)?;
+                    } else if source.is_installable() {
+                        return Err(SecurityError::InvalidTrustedSource(format!(
+                            "{} is installable but has no pinned_release",
+                            source.core_id
+                        )));
+                    }
                 }
             }
 
@@ -249,6 +287,56 @@ impl TrustedSourcePolicy {
 
         Ok(())
     }
+}
+
+fn validate_pinned_release(
+    source: &TrustedCoreSource,
+    pinned: &PinnedRelease,
+) -> Result<(), SecurityError> {
+    if pinned.version.trim().is_empty() {
+        return Err(SecurityError::InvalidTrustedSource(format!(
+            "{} pinned release version is empty",
+            source.core_id
+        )));
+    }
+
+    if pinned.asset_name.trim().is_empty()
+        || pinned.asset_name.contains('/')
+        || pinned.asset_name.contains('\\')
+    {
+        return Err(SecurityError::InvalidTrustedSource(format!(
+            "{} pinned release asset name is unsafe",
+            source.core_id
+        )));
+    }
+
+    validate_sha256_hex(&pinned.sha256).map_err(|error| {
+        SecurityError::InvalidTrustedSource(format!("{} pinned release {error}", source.core_id))
+    })?;
+
+    if !source
+        .allowed_asset_patterns
+        .iter()
+        .any(|pattern| wildcard_match(pattern, &pinned.asset_name))
+    {
+        return Err(SecurityError::InvalidTrustedSource(format!(
+            "{} pinned asset is not allowed: {}",
+            source.core_id, pinned.asset_name
+        )));
+    }
+
+    if pinned
+        .min_app_version
+        .as_deref()
+        .is_some_and(|version| version.trim().is_empty())
+    {
+        return Err(SecurityError::InvalidTrustedSource(format!(
+            "{} pinned release min_app_version is empty",
+            source.core_id
+        )));
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -687,6 +775,7 @@ mod tests {
 
     #[test]
     fn installed_core_policy_accepts_active_github_manifest_with_checksum() {
+        let artifact = b"example archive bytes";
         let sources = vec![TrustedCoreSource {
             core_id: CoreId::from("sing-box"),
             display_name: "sing-box".to_string(),
@@ -700,9 +789,14 @@ mod tests {
             checksum_required: true,
             signature_preferred: true,
             allowed_asset_patterns: vec!["sing-box-*-windows-amd64.zip".to_string()],
+            pinned_release: Some(PinnedRelease {
+                version: "1.0.0".to_string(),
+                asset_name: "sing-box-1.0.0-windows-amd64.zip".to_string(),
+                sha256: sha256_hex(artifact),
+                min_app_version: None,
+            }),
             notes: None,
         }];
-        let artifact = b"example archive bytes";
         let manifest = InstalledCoreManifest {
             core_id: CoreId::from("sing-box"),
             display_name: "sing-box".to_string(),
@@ -742,5 +836,75 @@ mod tests {
             .verify_artifact_bytes(&manifest, b"not zero")
             .unwrap_err();
         assert!(matches!(error, SecurityError::ChecksumMismatch(_)));
+    }
+
+    #[test]
+    fn trusted_source_policy_rejects_installable_without_pin() {
+        let json = r#"
+        [
+          {
+            "core_id": "example",
+            "display_name": "Example",
+            "source_type": "github_release",
+            "status": "active",
+            "homepage": "https://example.com",
+            "license": "MIT",
+            "owner": "owner",
+            "repo": "repo",
+            "install_enabled": true,
+            "checksum_required": true,
+            "allowed_asset_patterns": ["example-*.zip"]
+          }
+        ]
+        "#;
+
+        let error = TrustedSourcePolicy::default()
+            .parse_sources(json)
+            .unwrap_err();
+        assert!(matches!(error, SecurityError::InvalidTrustedSource(_)));
+    }
+
+    #[test]
+    fn installed_core_policy_rejects_manifest_outside_pinned_release() {
+        let artifact = b"example archive bytes";
+        let sources = vec![TrustedCoreSource {
+            core_id: CoreId::from("sing-box"),
+            display_name: "sing-box".to_string(),
+            source_type: SourceType::GithubRelease,
+            status: SourceStatus::Active,
+            homepage: Some("https://example.com".to_string()),
+            license: Some("GPL-3.0-or-later".to_string()),
+            owner: Some("SagerNet".to_string()),
+            repo: Some("sing-box".to_string()),
+            install_enabled: true,
+            checksum_required: true,
+            signature_preferred: true,
+            allowed_asset_patterns: vec!["sing-box-*-windows-amd64.zip".to_string()],
+            pinned_release: Some(PinnedRelease {
+                version: "1.0.0".to_string(),
+                asset_name: "sing-box-1.0.0-windows-amd64.zip".to_string(),
+                sha256: sha256_hex(artifact),
+                min_app_version: None,
+            }),
+            notes: None,
+        }];
+        let manifest = InstalledCoreManifest {
+            core_id: CoreId::from("sing-box"),
+            display_name: "sing-box".to_string(),
+            version: "1.0.1".to_string(),
+            source_type: SourceType::GithubRelease,
+            owner: Some("SagerNet".to_string()),
+            repo: Some("sing-box".to_string()),
+            asset_name: "sing-box-1.0.1-windows-amd64.zip".to_string(),
+            executable_path: "sing-box.exe".to_string(),
+            sha256: sha256_hex(artifact),
+            signature_status: SignatureStatus::Unknown,
+            installed_at_unix_ms: 0,
+        };
+
+        let error = InstalledCorePolicy::default()
+            .validate_manifest(&manifest, &sources)
+            .unwrap_err();
+        assert!(matches!(error, SecurityError::UntrustedInstalledCore(_)));
     }
 }

@@ -160,6 +160,8 @@ Implemented in the Rust + Flutter path:
 - Live network metrics service based on OS counters while connected.
 - Combined PowerShell build/check/run scripts for the Rust + Flutter app.
 - Trusted-source registry scaffold for future optional cores.
+- Core store can list installed cores and track the active version per core.
+- Installable GitHub-release cores now require pinned release metadata before download UI can be enabled.
 
 Still in progress:
 
