@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use poh_core::Redactor;
+use poh_core::{CoreId, Redactor};
 use poh_core_runner::MaterializedRuntime;
 use poh_core_store::VerifiedCore;
 use serde::{Deserialize, Serialize};
@@ -81,6 +81,106 @@ impl SessionStartupProbe {
         match self {
             Self::DelayOnly => Ok(false),
             Self::TcpSocket { address } => tcp_socket_is_ready(address, timings),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CoreWorkingDirectory {
+    InstallDir,
+    ExecutableParent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimePathMode {
+    KeepRelative,
+    AbsoluteRuntimeDir,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreLaunchDescriptor {
+    pub core_id: CoreId,
+    pub executable_relative_path: String,
+    pub working_directory: CoreWorkingDirectory,
+    pub runtime_path_mode: RuntimePathMode,
+    pub append_args: Vec<String>,
+    pub log_file_name: Option<String>,
+}
+
+impl CoreLaunchDescriptor {
+    pub fn for_core(core_id: &CoreId) -> Option<Self> {
+        match core_id.as_str() {
+            "trusttunnel" => Some(Self::trusttunnel()),
+            "sing-box" => Some(Self::simple_archive_core("sing-box", "sing-box.exe")),
+            "naiveproxy" => Some(Self::simple_archive_core("naiveproxy", "naive.exe")),
+            "xray-core" => Some(Self::simple_archive_core("xray-core", "xray.exe")),
+            "hysteria2" => Some(Self::simple_archive_core(
+                "hysteria2",
+                "hysteria-windows-amd64.exe",
+            )),
+            _ => None,
+        }
+    }
+
+    pub fn trusttunnel() -> Self {
+        Self {
+            core_id: CoreId::from("trusttunnel"),
+            executable_relative_path: "trusttunnel_client.exe".to_string(),
+            working_directory: CoreWorkingDirectory::ExecutableParent,
+            runtime_path_mode: RuntimePathMode::AbsoluteRuntimeDir,
+            append_args: vec!["--loglevel".to_string(), "info".to_string()],
+            log_file_name: Some("trusttunnel.log".to_string()),
+        }
+    }
+
+    pub fn build_spec(
+        &self,
+        executable_path: impl Into<PathBuf>,
+        install_dir: impl Into<PathBuf>,
+        runtime_dir: &Path,
+        runtime: &MaterializedRuntime,
+    ) -> Result<CoreLaunchSpec, SessionError> {
+        let executable_path = executable_path.into();
+        let install_dir = install_dir.into();
+        let working_dir = match self.working_directory {
+            CoreWorkingDirectory::InstallDir => install_dir,
+            CoreWorkingDirectory::ExecutableParent => executable_path
+                .parent()
+                .ok_or_else(|| SessionError::MissingWorkingDirectory(executable_path.clone()))?
+                .to_path_buf(),
+        };
+        let mut args = match self.runtime_path_mode {
+            RuntimePathMode::KeepRelative => runtime.command_args.clone(),
+            RuntimePathMode::AbsoluteRuntimeDir => {
+                absolutize_runtime_args(&runtime.command_args, runtime_dir, runtime)?
+            }
+        };
+        args.extend(self.append_args.clone());
+
+        let spec = CoreLaunchSpec {
+            executable_path,
+            working_dir,
+            args,
+            environment: runtime.environment.clone(),
+        };
+        validate_launch_spec(&spec)?;
+        Ok(spec)
+    }
+
+    pub fn log_path(&self, runtime_dir: &Path) -> Option<PathBuf> {
+        self.log_file_name
+            .as_ref()
+            .map(|file_name| runtime_dir.join(file_name))
+    }
+
+    fn simple_archive_core(core_id: &str, executable_relative_path: &str) -> Self {
+        Self {
+            core_id: CoreId::from(core_id),
+            executable_relative_path: executable_relative_path.to_string(),
+            working_directory: CoreWorkingDirectory::InstallDir,
+            runtime_path_mode: RuntimePathMode::KeepRelative,
+            append_args: Vec::new(),
+            log_file_name: None,
         }
     }
 }
@@ -257,6 +357,39 @@ pub fn wait_for_process_exit(
     }
 }
 
+fn absolutize_runtime_args(
+    args: &[String],
+    runtime_dir: &Path,
+    runtime: &MaterializedRuntime,
+) -> Result<Vec<String>, SessionError> {
+    args.iter()
+        .map(|arg| {
+            if runtime.files.iter().any(|file| file.relative_path == *arg) {
+                validate_relative_runtime_arg(arg)?;
+                Ok(runtime_dir.join(arg).display().to_string())
+            } else {
+                Ok(arg.clone())
+            }
+        })
+        .collect()
+}
+
+fn validate_relative_runtime_arg(arg: &str) -> Result<(), SessionError> {
+    let path = Path::new(arg);
+    if arg.trim().is_empty() || path.is_absolute() || arg.contains('\\') || arg.contains(':') {
+        return Err(SessionError::UnsafeRuntimePath(arg.to_string()));
+    }
+
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) => {}
+            _ => return Err(SessionError::UnsafeRuntimePath(arg.to_string())),
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreProcessOutput {
     pub status: ExitStatus,
@@ -276,6 +409,10 @@ pub enum SessionError {
     UnsafeEnvironmentKey(String),
     #[error("unsafe environment value for key: {0}")]
     UnsafeEnvironmentValue(String),
+    #[error("unsafe runtime path argument: {0}")]
+    UnsafeRuntimePath(String),
+    #[error("core launch descriptor is missing for {0}")]
+    MissingLaunchDescriptor(String),
     #[error("session lock is already held: {0}")]
     SessionLockBusy(PathBuf),
     #[error("core exited during startup with code {0:?}")]
@@ -439,6 +576,58 @@ mod tests {
         let third = SessionFileLock::acquire(&lock_path).unwrap();
         drop(third);
         assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn trusttunnel_descriptor_builds_absolute_runtime_args() {
+        let core = verified_current_exe();
+        let runtime = MaterializedRuntime {
+            files: vec![poh_core_runner::MaterializedFile {
+                relative_path: "config.toml".to_string(),
+                content: "loglevel = \"info\"".to_string(),
+                sensitive: false,
+            }],
+            command_args: vec!["--config".to_string(), "config.toml".to_string()],
+            environment: BTreeMap::new(),
+        };
+        let descriptor = CoreLaunchDescriptor::trusttunnel();
+
+        let spec = descriptor
+            .build_spec(
+                core.executable_path.clone(),
+                core.install_dir.clone(),
+                &core.install_dir,
+                &runtime,
+            )
+            .unwrap();
+
+        assert_eq!(spec.executable_path, core.executable_path);
+        assert_eq!(spec.working_dir, core.install_dir);
+        assert_eq!(spec.args[0], "--config");
+        assert_eq!(
+            spec.args[1],
+            core.install_dir.join("config.toml").display().to_string()
+        );
+        assert_eq!(spec.args[2..], ["--loglevel", "info"]);
+        assert_eq!(
+            descriptor.log_path(&core.install_dir),
+            Some(core.install_dir.join("trusttunnel.log"))
+        );
+    }
+
+    #[test]
+    fn descriptor_registry_exposes_known_executables() {
+        let sing_box = CoreLaunchDescriptor::for_core(&CoreId::from("sing-box")).unwrap();
+        let naive = CoreLaunchDescriptor::for_core(&CoreId::from("naiveproxy")).unwrap();
+        let trusttunnel = CoreLaunchDescriptor::for_core(&CoreId::from("trusttunnel")).unwrap();
+
+        assert_eq!(sing_box.executable_relative_path, "sing-box.exe");
+        assert_eq!(naive.executable_relative_path, "naive.exe");
+        assert_eq!(
+            trusttunnel.executable_relative_path,
+            "trusttunnel_client.exe"
+        );
+        assert!(CoreLaunchDescriptor::for_core(&CoreId::from("unknown")).is_none());
     }
 
     fn verified_current_exe() -> VerifiedCore {

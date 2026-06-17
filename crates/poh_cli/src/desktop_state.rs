@@ -15,8 +15,8 @@ use poh_core::{
 };
 use poh_core_runner::{MapSecretResolver, MaterializedRuntime, RuntimeMaterializer};
 use poh_core_session::{
-    wait_for_process_startup, SessionFileLock, SessionLifecycleState, SessionStartupProbe,
-    SessionTimings,
+    wait_for_process_startup, CoreLaunchDescriptor, SessionFileLock, SessionLifecycleState,
+    SessionStartupProbe, SessionTimings,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -160,6 +160,11 @@ pub fn start_desktop_session(
     let startup_probe = startup_probe_for_profile(&desktop_profile);
     let (profile, materialized, redacted_preview) =
         build_materialized_session(desktop_profile, &secrets)?;
+    let launch_descriptor = CoreLaunchDescriptor::for_core(&profile.core_id).ok_or_else(|| {
+        DesktopStateError::Session(poh_core_session::SessionError::MissingLaunchDescriptor(
+            profile.core_id.to_string(),
+        ))
+    })?;
     let executable_path = find_trusttunnel_client()?;
     let started_at_unix_ms = now_unix_ms();
     let runtime_dir = runtime_root()?.join(format!(
@@ -181,26 +186,31 @@ pub fn start_desktop_session(
         })
         .cloned()
         .ok_or_else(|| DesktopStateError::RuntimeConfigMissing("config.toml".to_string()))?;
-    let log_path = runtime_dir.join("trusttunnel.log");
+    let log_path = launch_descriptor
+        .log_path(&runtime_dir)
+        .unwrap_or_else(|| runtime_dir.join("core.log"));
     let stdout = File::create(&log_path)?;
     restrict_runtime_permissions(&log_path)?;
     let stderr = stdout.try_clone()?;
-    let command_args = vec![
-        "--config".to_string(),
-        config_path.display().to_string(),
-        "--loglevel".to_string(),
-        "info".to_string(),
-    ];
-    let working_dir = executable_path
+    let install_dir = executable_path
         .parent()
         .ok_or_else(|| DesktopStateError::InvalidCorePath(executable_path.clone()))?;
-    let mut child = Command::new(&executable_path)
-        .current_dir(working_dir)
-        .args(&command_args)
+    let launch_spec =
+        launch_descriptor.build_spec(&executable_path, install_dir, &runtime_dir, &materialized)?;
+    let command_args = launch_spec.args.clone();
+    let mut command = Command::new(&launch_spec.executable_path);
+    command
+        .current_dir(&launch_spec.working_dir)
+        .args(&launch_spec.args)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()?;
+        .stderr(Stdio::from(stderr));
+
+    for (key, value) in &launch_spec.environment {
+        command.env(key, value);
+    }
+
+    let mut child = command.spawn()?;
 
     let pid = child.id();
     let mut session = PersistedDesktopSession {

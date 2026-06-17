@@ -20,17 +20,21 @@ the managed core store.
 - [x] A2. Separate pinned archive SHA from installed file hashes for tamper detection.
 - [ ] A2. Add GC for old versions: active + rollback retention.
 - [x] A3. Add HTTPS downloader for pinned GitHub assets with SHA-256 verification.
-- [x] A3. Add CLI `core-download-plan <core-id>` and manual `core-install <core-id> <executable-relative-path>`.
+- [x] A3. Add CLI `core-download-plan <core-id>` and `core-install <core-id> [executable-relative-path]`.
 - [x] A4. Add session lifecycle states, single-instance file lock, stale lock recovery, and readiness probe helpers.
 - [x] A4. Wire desktop TrustTunnel start/stop/status into session lock, startup readiness, and faulted session state.
 - [ ] A4. Add long-lived watchdog/service layer for automatic crash rollback while the UI process is not polling.
-- [ ] A5. Add `CoreLaunchDescriptor` so install/start no longer needs per-core CLI path knowledge.
+- [x] A5. Add `CoreLaunchDescriptor` registry with executable path, working directory, runtime path mode, append args, and log file policy.
+- [x] A5. Use descriptors for `core-install <core-id>` default executable paths.
+- [x] A5. Use TrustTunnel descriptor for desktop launch args/log path instead of hardcoding command args in the desktop session flow.
+- [ ] A5. Move bundled TrustTunnel lookup itself into managed store / descriptor-backed module resolution.
 
 ## Phase B - TrustTunnel As Managed Module
 
 - [ ] Move bundled TrustTunnel into store layout `cores/trusttunnel/<version>/`.
 - [ ] Keep pinned SHA checks for `trusttunnel_client.exe` and `wintun.dll`.
-- [ ] Launch TrustTunnel through the shared descriptor/session layer.
+- [x] Launch TrustTunnel command args/log path through the shared descriptor/session layer.
+- [ ] Resolve TrustTunnel executable from managed core store instead of app-local bundle lookup.
 - [ ] Keep a migration path for the current app-local bundle until an official pinned download source exists.
 
 ## Phase C - NaiveProxy As First Downloadable Module
@@ -52,8 +56,6 @@ the managed core store.
 
 ## Next Safe Step
 
-Implement A4 `SessionManager`: one active core session at a time, explicit
-`Idle -> Preparing -> Starting -> Running -> Stopping/Faulted` state machine,
-readiness probes, stop timeout with force kill, startup orphan cleanup, and
-system proxy rollback hooks. The in-process primitives and desktop CLI wiring
-are in place; the remaining part is the long-lived watchdog/service behavior.
+Start Phase B: move bundled TrustTunnel from the app-local `native/bundled`
+lookup into the managed core store layout while keeping the current pinned
+SHA checks and migration path.

@@ -79,6 +79,9 @@ This crate contains process-launch and lifecycle primitives:
 - single-instance file lock with stale-lock recovery;
 - startup readiness probes, including local TCP socket readiness;
 - shared startup/stop timing defaults.
+- `CoreLaunchDescriptor`, which describes executable path, working directory,
+  runtime path mode, extra launch args, and optional log file for each known
+  core.
 
 The remaining architecture step is a long-lived watchdog/service layer that can
 observe crashes and run rollback hooks even when the Flutter UI is not polling.
@@ -117,7 +120,7 @@ The Flutter app talks to Rust through this CLI. Useful commands:
 .\target\debug\poh_cli.exe detect "<profile text>"
 .\target\debug\poh_cli.exe core-list-installed
 .\target\debug\poh_cli.exe core-download-plan <core-id>
-.\target\debug\poh_cli.exe core-install <core-id> <executable-relative-path>
+.\target\debug\poh_cli.exe core-install <core-id> [executable-relative-path]
 .\target\debug\poh_cli.exe desktop-import-profile C:\path\to\profile.toml
 .\target\debug\poh_cli.exe desktop-session-plan <desktop-state.json> <profile-id>
 .\target\debug\poh_cli.exe desktop-session-start <desktop-state.json> <profile-id>
@@ -126,9 +129,10 @@ The Flutter app talks to Rust through this CLI. Useful commands:
 .\target\debug\poh_cli.exe desktop-session-stop
 ```
 
-`core-install` currently needs `<executable-relative-path>` because
-`CoreLaunchDescriptor` is not implemented yet. After descriptors exist, this
-will be known per core.
+`core-install` can infer executable paths for known cores through
+`CoreLaunchDescriptor`. The optional executable path remains as an escape hatch
+for development builds or a future core that is not in the descriptor registry
+yet.
 
 ## Desktop State And Secrets
 
@@ -253,11 +257,13 @@ Ready:
 - Import preview blocks risky TLS/LAN settings until confirmed.
 - Trusted core store supports active version tracking, zip artifacts, pinned
   archive SHA, installed file hashes, and pinned GitHub download planning.
+- Launch descriptor registry is in place for known cores and is already used by
+  desktop TrustTunnel launch args/log path and CLI install defaults.
 
 Still in progress:
 
 - Long-lived session watchdog/service behavior.
-- `CoreLaunchDescriptor` for per-core executable/config/log knowledge.
-- TrustTunnel migration from app-local bundle into managed core store.
+- Descriptor-backed TrustTunnel executable resolution from managed core store.
+- TrustTunnel migration from app-local bundle into managed core store layout.
 - NaiveProxy/sing-box/Xray/Hysteria adapters and install UI.
 - Installer, tray behavior, and release packaging.

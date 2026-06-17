@@ -13,7 +13,7 @@ use poh_core::{
     TrustedCoreSource, TrustedSourcePolicy,
 };
 use poh_core_runner::{MapSecretResolver, RuntimeMaterializer};
-use poh_core_session::{CoreLaunchSpec, CoreProcess};
+use poh_core_session::{CoreLaunchDescriptor, CoreLaunchSpec, CoreProcess};
 use poh_core_store::{CoreArtifact, CoreDownloader, CoreInstallRequest, CoreStore};
 
 const MAX_DESKTOP_IMPORT_BYTES: u64 = 2 * 1024 * 1024;
@@ -82,7 +82,7 @@ fn main() -> ExitCode {
         Some(command) => {
             eprintln!("Unknown command: {command}");
             eprintln!(
-                "Usage: poh_cli [list|sources|core-list-installed|core-download-plan <core-id>|core-install <core-id> <executable-relative-path>|runtime-smoke|store-smoke|session-smoke|desktop-preview-profile <input-text-file|->|desktop-import-profile <input-text-file|->|desktop-session-plan <state-path> <profile-id>|desktop-session-start <state-path> <profile-id>|desktop-session-stop|desktop-session-status|desktop-session-log|detect <profile text>]"
+                "Usage: poh_cli [list|sources|core-list-installed|core-download-plan <core-id>|core-install <core-id> [executable-relative-path]|runtime-smoke|store-smoke|session-smoke|desktop-preview-profile <input-text-file|->|desktop-import-profile <input-text-file|->|desktop-session-plan <state-path> <profile-id>|desktop-session-start <state-path> <profile-id>|desktop-session-stop|desktop-session-status|desktop-session-log|detect <profile text>]"
             );
             ExitCode::from(2)
         }
@@ -256,8 +256,12 @@ fn core_download_plan(args: &[String]) -> ExitCode {
 }
 
 fn core_install(args: &[String]) -> ExitCode {
-    let [core_id, executable_relative_path] = args else {
-        eprintln!("Usage: poh_cli core-install <core-id> <executable-relative-path>");
+    let Some(core_id) = args.first() else {
+        eprintln!("Usage: poh_cli core-install <core-id> [executable-relative-path]");
+        return ExitCode::from(2);
+    };
+    if args.len() > 2 {
+        eprintln!("Usage: poh_cli core-install <core-id> [executable-relative-path]");
         return ExitCode::from(2);
     };
 
@@ -274,6 +278,17 @@ fn core_install(args: &[String]) -> ExitCode {
             eprintln!("{error}");
             return ExitCode::from(1);
         }
+    };
+    let executable_relative_path = args.get(1).cloned().or_else(|| {
+        CoreLaunchDescriptor::for_core(&source.core_id)
+            .map(|descriptor| descriptor.executable_relative_path)
+    });
+    let Some(executable_relative_path) = executable_relative_path else {
+        eprintln!(
+            "Core install failed: launch descriptor is missing for {} and no executable path was provided",
+            source.core_id
+        );
+        return ExitCode::from(1);
     };
 
     let downloaded = match CoreDownloader::default().download(source) {

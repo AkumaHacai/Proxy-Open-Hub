@@ -46,7 +46,7 @@ Date: 2026-06-18
   - SHA-256 is verified before install request creation.
 - Added CLI commands:
   - `poh_cli core-download-plan <core-id>`;
-  - `poh_cli core-install <core-id> <executable-relative-path>`.
+  - `poh_cli core-install <core-id> [executable-relative-path]`.
 - Added session lifecycle foundation:
   - `SessionLifecycleState`;
   - session file lock with stale-lock recovery;
@@ -58,6 +58,11 @@ Date: 2026-06-18
   - TUN mode keeps a short delay-only startup grace;
   - dead processes are marked `faulted` instead of silently losing session context;
   - `session.json` writes are atomic.
+- Added launch descriptor foundation:
+  - descriptor registry for TrustTunnel, sing-box, NaiveProxy, Xray-core, and Hysteria2;
+  - default executable paths for `core-install <core-id>`;
+  - descriptor-based working directory/runtime path behavior;
+  - TrustTunnel desktop launch now gets command args and log file policy from the descriptor.
 - Rewrote `InfoProject.md` and `todone_arh.md` into clean ASCII documentation.
 
 ## Verified
@@ -75,7 +80,7 @@ Date: 2026-06-18
 - Add core store GC for old versions and rollback retention.
 - Add long-lived watchdog/service behavior with automatic crash rollback.
 - Add system proxy rollback hooks when proxy automation is enabled.
-- Add `CoreLaunchDescriptor` so per-core executable/config/log knowledge moves out of CLI arguments.
+- Move bundled TrustTunnel lookup into managed core store / descriptor-backed module resolution.
 - Move bundled TrustTunnel into managed core store layout.
 - Add NaiveProxy as the first downloadable optional module after a pinned release is selected.
 - Add signature/AuthentiCode or publisher validation before enabling automatic install/update UI.
