@@ -21,7 +21,9 @@ the managed core store.
 - [ ] A2. Add GC for old versions: active + rollback retention.
 - [x] A3. Add HTTPS downloader for pinned GitHub assets with SHA-256 verification.
 - [x] A3. Add CLI `core-download-plan <core-id>` and manual `core-install <core-id> <executable-relative-path>`.
-- [ ] A4. Add `SessionManager` with states, single-instance lock, readiness probe, and watchdog.
+- [x] A4. Add session lifecycle states, single-instance file lock, stale lock recovery, and readiness probe helpers.
+- [x] A4. Wire desktop TrustTunnel start/stop/status into session lock, startup readiness, and faulted session state.
+- [ ] A4. Add long-lived watchdog/service layer for automatic crash rollback while the UI process is not polling.
 - [ ] A5. Add `CoreLaunchDescriptor` so install/start no longer needs per-core CLI path knowledge.
 
 ## Phase B - TrustTunnel As Managed Module
@@ -53,4 +55,5 @@ the managed core store.
 Implement A4 `SessionManager`: one active core session at a time, explicit
 `Idle -> Preparing -> Starting -> Running -> Stopping/Faulted` state machine,
 readiness probes, stop timeout with force kill, startup orphan cleanup, and
-system proxy rollback hooks.
+system proxy rollback hooks. The in-process primitives and desktop CLI wiring
+are in place; the remaining part is the long-lived watchdog/service behavior.

@@ -69,11 +69,19 @@ This crate materializes runtime files before launch:
 
 ### `poh_core_session`
 
-This crate contains process-launch primitives. It is intentionally low-level
-right now: launch spec, executable checks, process start/wait, and redacted
-output. The next architecture step is a higher-level `SessionManager` with one
-active core session, readiness probes, stop timeout, watchdog, and rollback
-hooks.
+This crate contains process-launch and lifecycle primitives:
+
+- launch spec validation;
+- executable checks;
+- process start/wait helpers;
+- redacted output;
+- `SessionLifecycleState`;
+- single-instance file lock with stale-lock recovery;
+- startup readiness probes, including local TCP socket readiness;
+- shared startup/stop timing defaults.
+
+The remaining architecture step is a long-lived watchdog/service layer that can
+observe crashes and run rollback hooks even when the Flutter UI is not polling.
 
 ### `poh_core_store`
 
@@ -248,7 +256,7 @@ Ready:
 
 Still in progress:
 
-- `SessionManager` with a strict state machine and readiness probes.
+- Long-lived session watchdog/service behavior.
 - `CoreLaunchDescriptor` for per-core executable/config/log knowledge.
 - TrustTunnel migration from app-local bundle into managed core store.
 - NaiveProxy/sing-box/Xray/Hysteria adapters and install UI.

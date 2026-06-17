@@ -9,4 +9,5 @@ repository.workspace = true
 poh_core = { path = "../poh_core" }
 poh_core_runner = { path = "../poh_core_runner" }
 poh_core_store = { path = "../poh_core_store" }
+serde.workspace = true
 thiserror.workspace = true

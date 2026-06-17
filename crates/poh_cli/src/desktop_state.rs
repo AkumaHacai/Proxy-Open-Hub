@@ -4,7 +4,6 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose, Engine as _};
@@ -15,6 +14,10 @@ use poh_core::{
     ValidationWarning,
 };
 use poh_core_runner::{MapSecretResolver, MaterializedRuntime, RuntimeMaterializer};
+use poh_core_session::{
+    wait_for_process_startup, SessionFileLock, SessionLifecycleState, SessionStartupProbe,
+    SessionTimings,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -94,6 +97,12 @@ pub struct PersistedDesktopSession {
     #[serde(default)]
     pub state_path: String,
     pub started_at_unix_ms: u64,
+    #[serde(default = "default_persisted_session_state")]
+    pub lifecycle_state: SessionLifecycleState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub updated_at_unix_ms: u64,
 }
 
 const MAX_IMPORT_BYTES: usize = 2 * 1024 * 1024;
@@ -131,12 +140,14 @@ pub fn start_desktop_session(
     state_path: &Path,
     profile_id: &str,
 ) -> Result<DesktopSessionStart, DesktopStateError> {
-    let status = desktop_session_status()?;
+    let _lock = SessionFileLock::acquire(session_lock_file()?)?;
+    let status = desktop_session_status_unlocked()?;
     if status.running {
         if let Some(session) = status.session {
             return Err(DesktopStateError::SessionAlreadyRunning(session.pid));
         }
     }
+    clear_persisted_session(status.session)?;
     cleanup_orphaned_runtime_dirs()?;
 
     let state = load_desktop_state(state_path)?;
@@ -146,6 +157,7 @@ pub fn start_desktop_session(
         .into_iter()
         .find(|profile| profile.id == profile_id)
         .ok_or_else(|| DesktopStateError::ProfileNotFound(profile_id.to_string()))?;
+    let startup_probe = startup_probe_for_profile(&desktop_profile);
     let (profile, materialized, redacted_preview) =
         build_materialized_session(desktop_profile, &secrets)?;
     let executable_path = find_trusttunnel_client()?;
@@ -190,17 +202,8 @@ pub fn start_desktop_session(
         .stderr(Stdio::from(stderr))
         .spawn()?;
 
-    thread::sleep(Duration::from_millis(700));
-    if let Some(status) = child.try_wait()? {
-        let log_tail = read_log_tail(&log_path);
-        return Err(DesktopStateError::CoreExitedDuringStartup(
-            status.code(),
-            log_tail,
-        ));
-    }
-
     let pid = child.id();
-    let session = PersistedDesktopSession {
+    let mut session = PersistedDesktopSession {
         profile_id: profile.id.to_string(),
         profile_name: profile.name,
         core_id: profile.core_id.to_string(),
@@ -211,11 +214,37 @@ pub fn start_desktop_session(
         runtime_dir: runtime_dir.display().to_string(),
         state_path: state_path.display().to_string(),
         started_at_unix_ms,
+        lifecycle_state: SessionLifecycleState::Starting,
+        last_error: None,
+        updated_at_unix_ms: started_at_unix_ms,
     };
     if let Err(error) = save_session(&session) {
         let _ = child.kill();
         return Err(error);
     }
+
+    let startup_timings = startup_timings_for_probe(&startup_probe);
+    if let Err(error) = wait_for_process_startup(&mut child, &startup_probe, startup_timings) {
+        let log_tail = read_log_tail(&log_path);
+        session.lifecycle_state = SessionLifecycleState::Faulted;
+        session.last_error = Some(format!("{error}: {log_tail}"));
+        session.updated_at_unix_ms = now_unix_ms();
+        let _ = save_session(&session);
+        runtime_guard.keep();
+        return match error {
+            poh_core_session::SessionError::CoreExitedDuringStartup(code) => {
+                Err(DesktopStateError::CoreExitedDuringStartup(code, log_tail))
+            }
+            poh_core_session::SessionError::ReadinessTimedOut(address) => {
+                Err(DesktopStateError::CoreReadinessTimedOut(address, log_tail))
+            }
+            other => Err(DesktopStateError::Session(other)),
+        };
+    }
+
+    session.lifecycle_state = SessionLifecycleState::Running;
+    session.updated_at_unix_ms = now_unix_ms();
+    save_session(&session)?;
     runtime_guard.keep();
 
     Ok(DesktopSessionStart {
@@ -235,6 +264,7 @@ pub fn start_desktop_session(
 }
 
 pub fn stop_desktop_session() -> Result<DesktopSessionStatus, DesktopStateError> {
+    let _lock = SessionFileLock::acquire(session_lock_file()?)?;
     let Some(session) = load_session()? else {
         return Ok(DesktopSessionStatus {
             running: false,
@@ -242,15 +272,16 @@ pub fn stop_desktop_session() -> Result<DesktopSessionStatus, DesktopStateError>
         });
     };
 
+    let mut stopping_session = session.clone();
+    stopping_session.lifecycle_state = SessionLifecycleState::Stopping;
+    stopping_session.updated_at_unix_ms = now_unix_ms();
+    let _ = save_session(&stopping_session);
+
     if is_session_process_running(&session)? {
         stop_process(session.pid)?;
     }
 
-    let _ = fs::remove_file(session_file()?);
-    let runtime_dir = PathBuf::from(&session.runtime_dir);
-    if runtime_dir.exists() {
-        let _ = fs::remove_dir_all(runtime_dir);
-    }
+    clear_persisted_session(Some(session.clone()))?;
 
     Ok(DesktopSessionStatus {
         running: false,
@@ -259,6 +290,10 @@ pub fn stop_desktop_session() -> Result<DesktopSessionStatus, DesktopStateError>
 }
 
 pub fn desktop_session_status() -> Result<DesktopSessionStatus, DesktopStateError> {
+    desktop_session_status_unlocked()
+}
+
+fn desktop_session_status_unlocked() -> Result<DesktopSessionStatus, DesktopStateError> {
     let Some(session) = load_session()? else {
         return Ok(DesktopSessionStatus {
             running: false,
@@ -266,14 +301,44 @@ pub fn desktop_session_status() -> Result<DesktopSessionStatus, DesktopStateErro
         });
     };
     let running = is_session_process_running(&session)?;
+    if running && session.lifecycle_state == SessionLifecycleState::Idle {
+        let mut migrated = session.clone();
+        migrated.lifecycle_state = SessionLifecycleState::Running;
+        migrated.updated_at_unix_ms = now_unix_ms();
+        let _ = save_session(&migrated);
+        return Ok(DesktopSessionStatus {
+            running,
+            session: Some(migrated),
+        });
+    }
+
     if !running {
-        let _ = fs::remove_file(session_file()?);
+        let mut faulted = session.clone();
+        if matches!(
+            faulted.lifecycle_state,
+            SessionLifecycleState::Starting
+                | SessionLifecycleState::Running
+                | SessionLifecycleState::Stopping
+        ) {
+            faulted.lifecycle_state = SessionLifecycleState::Faulted;
+            faulted.last_error = Some("session process is not running".to_string());
+            faulted.updated_at_unix_ms = now_unix_ms();
+            let _ = save_session(&faulted);
+            return Ok(DesktopSessionStatus {
+                running,
+                session: Some(faulted),
+            });
+        }
     }
 
     Ok(DesktopSessionStatus {
         running,
         session: Some(session),
     })
+}
+
+fn default_persisted_session_state() -> SessionLifecycleState {
+    SessionLifecycleState::Running
 }
 
 pub fn desktop_session_log() -> Result<DesktopSessionLog, DesktopStateError> {
@@ -598,6 +663,8 @@ pub enum DesktopStateError {
     RuntimeConfigMissing(String),
     #[error("TrustTunnel core exited during startup with code {0:?}: {1}")]
     CoreExitedDuringStartup(Option<i32>, String),
+    #[error("TrustTunnel readiness probe timed out for {0}: {1}")]
+    CoreReadinessTimedOut(String, String),
     #[error("import input is too large: {0} bytes")]
     ImportTooLarge(usize),
     #[error("desktop state is too large: {0}")]
@@ -616,6 +683,8 @@ pub enum DesktopStateError {
     Adapter(#[from] poh_core::AdapterError),
     #[error(transparent)]
     Runner(#[from] poh_core_runner::RunnerError),
+    #[error(transparent)]
+    Session(#[from] poh_core_session::SessionError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -716,6 +785,10 @@ fn session_file() -> Result<PathBuf, DesktopStateError> {
     Ok(runtime_root()?.join("session.json"))
 }
 
+fn session_lock_file() -> Result<PathBuf, DesktopStateError> {
+    Ok(runtime_root()?.join("session.lock"))
+}
+
 fn load_session() -> Result<Option<PersistedDesktopSession>, DesktopStateError> {
     let path = session_file()?;
     if !path.exists() {
@@ -729,9 +802,54 @@ fn load_session() -> Result<Option<PersistedDesktopSession>, DesktopStateError> 
 fn save_session(session: &PersistedDesktopSession) -> Result<(), DesktopStateError> {
     let path = session_file()?;
     let json = serde_json::to_string_pretty(session)?;
-    fs::write(&path, json)?;
+    let temp_path = path.with_extension("json.tmp");
+    fs::write(&temp_path, json)?;
+    restrict_runtime_permissions(&temp_path)?;
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    fs::rename(&temp_path, &path)?;
     restrict_runtime_permissions(&path)?;
     Ok(())
+}
+
+fn clear_persisted_session(
+    session: Option<PersistedDesktopSession>,
+) -> Result<(), DesktopStateError> {
+    let session_path = session_file()?;
+    if session_path.exists() {
+        let _ = fs::remove_file(session_path);
+    }
+
+    if let Some(session) = session {
+        let runtime_dir = PathBuf::from(&session.runtime_dir);
+        if runtime_dir.exists() {
+            let _ = fs::remove_dir_all(runtime_dir);
+        }
+    }
+
+    Ok(())
+}
+
+fn startup_probe_for_profile(profile: &DesktopProfile) -> SessionStartupProbe {
+    if profile.listener.mode == 1 {
+        let address = profile.listener.socks.address.trim();
+        if !address.is_empty() {
+            return SessionStartupProbe::tcp(address);
+        }
+    }
+
+    SessionStartupProbe::DelayOnly
+}
+
+fn startup_timings_for_probe(probe: &SessionStartupProbe) -> SessionTimings {
+    match probe {
+        SessionStartupProbe::DelayOnly => SessionTimings {
+            startup_grace: Duration::from_millis(800),
+            ..SessionTimings::default()
+        },
+        SessionStartupProbe::TcpSocket { .. } => SessionTimings::default(),
+    }
 }
 
 fn is_session_process_running(

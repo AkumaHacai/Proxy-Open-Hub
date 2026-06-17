@@ -164,12 +164,14 @@ Implemented in the Rust + Flutter path:
 - Core store supports zip/multifile artifacts with zip-slip guards and installed file hashes.
 - Installable GitHub-release cores now require pinned release metadata before download UI can be enabled.
 - Rust downloader can plan and fetch only pinned GitHub release assets, then verify SHA-256 before install staging.
+- Desktop sessions now use lifecycle states, a single-instance lock, startup readiness probes, and faulted-session reporting.
 
 Still in progress:
 
 - Exact TrustTunnel/Wintun adapter matching for live traffic.
 - Log streaming instead of manual refresh.
 - Full routing/profile editor migration from WPF to Flutter.
+- Long-lived session watchdog/service behavior and system proxy rollback hooks.
 - Trusted download/update UI for sing-box, NaiveProxy, Xray-core, and Hysteria2.
 - Core launch descriptors, so downloaded modules no longer need a manual executable path during CLI install.
 - Installer, tray behavior, and packaging.

@@ -1,11 +1,132 @@
 use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use poh_core::Redactor;
 use poh_core_runner::MaterializedRuntime;
 use poh_core_store::VerifiedCore;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLifecycleState {
+    #[default]
+    Idle,
+    Preparing,
+    Starting,
+    Running,
+    Stopping,
+    Faulted,
+}
+
+impl SessionLifecycleState {
+    pub fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Idle, Self::Preparing)
+                | (Self::Idle, Self::Starting)
+                | (Self::Preparing, Self::Starting)
+                | (Self::Preparing, Self::Faulted)
+                | (Self::Starting, Self::Running)
+                | (Self::Starting, Self::Faulted)
+                | (Self::Running, Self::Stopping)
+                | (Self::Running, Self::Faulted)
+                | (Self::Stopping, Self::Idle)
+                | (Self::Stopping, Self::Faulted)
+                | (Self::Faulted, Self::Preparing)
+                | (Self::Faulted, Self::Idle)
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionTimings {
+    pub startup_grace: Duration,
+    pub poll_interval: Duration,
+    pub tcp_connect_timeout: Duration,
+    pub stop_timeout: Duration,
+}
+
+impl Default for SessionTimings {
+    fn default() -> Self {
+        Self {
+            startup_grace: Duration::from_secs(3),
+            poll_interval: Duration::from_millis(100),
+            tcp_connect_timeout: Duration::from_millis(120),
+            stop_timeout: Duration::from_secs(3),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SessionStartupProbe {
+    DelayOnly,
+    TcpSocket { address: String },
+}
+
+impl SessionStartupProbe {
+    pub fn tcp(address: impl Into<String>) -> Self {
+        Self::TcpSocket {
+            address: address.into(),
+        }
+    }
+
+    fn is_ready(&self, timings: &SessionTimings) -> Result<bool, SessionError> {
+        match self {
+            Self::DelayOnly => Ok(false),
+            Self::TcpSocket { address } => tcp_socket_is_ready(address, timings),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SessionFileLock {
+    path: PathBuf,
+}
+
+impl SessionFileLock {
+    pub fn acquire(path: impl Into<PathBuf>) -> Result<Self, SessionError> {
+        Self::acquire_with_stale_timeout(path, Duration::from_secs(120))
+    }
+
+    pub fn acquire_with_stale_timeout(
+        path: impl Into<PathBuf>,
+        stale_timeout: Duration,
+    ) -> Result<Self, SessionError> {
+        let path = path.into();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        if path.exists() && lock_is_stale(&path, stale_timeout) {
+            let _ = fs::remove_file(&path);
+        }
+
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                let _ = writeln!(file, "pid={}", std::process::id());
+                let _ = writeln!(file, "created_at_unix_ms={}", now_unix_ms());
+                Ok(Self { path })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(SessionError::SessionLockBusy(path))
+            }
+            Err(error) => Err(SessionError::Io(error)),
+        }
+    }
+}
+
+impl Drop for SessionFileLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreLaunchSpec {
@@ -90,6 +211,52 @@ impl CoreProcess {
     }
 }
 
+pub fn wait_for_process_startup(
+    child: &mut Child,
+    probe: &SessionStartupProbe,
+    timings: SessionTimings,
+) -> Result<(), SessionError> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Err(SessionError::CoreExitedDuringStartup(status.code()));
+        }
+
+        if probe.is_ready(&timings)? {
+            return Ok(());
+        }
+
+        if started.elapsed() >= timings.startup_grace {
+            return match probe {
+                SessionStartupProbe::DelayOnly => Ok(()),
+                SessionStartupProbe::TcpSocket { address } => {
+                    Err(SessionError::ReadinessTimedOut(address.clone()))
+                }
+            };
+        }
+
+        thread::sleep(timings.poll_interval);
+    }
+}
+
+pub fn wait_for_process_exit(
+    child: &mut Child,
+    timings: SessionTimings,
+) -> Result<bool, SessionError> {
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(true);
+        }
+
+        if started.elapsed() >= timings.stop_timeout {
+            return Ok(false);
+        }
+
+        thread::sleep(timings.poll_interval);
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreProcessOutput {
     pub status: ExitStatus,
@@ -109,8 +276,45 @@ pub enum SessionError {
     UnsafeEnvironmentKey(String),
     #[error("unsafe environment value for key: {0}")]
     UnsafeEnvironmentValue(String),
+    #[error("session lock is already held: {0}")]
+    SessionLockBusy(PathBuf),
+    #[error("core exited during startup with code {0:?}")]
+    CoreExitedDuringStartup(Option<i32>),
+    #[error("session readiness probe timed out: {0}")]
+    ReadinessTimedOut(String),
+    #[error("invalid readiness probe address: {0}")]
+    InvalidReadinessAddress(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+fn tcp_socket_is_ready(address: &str, timings: &SessionTimings) -> Result<bool, SessionError> {
+    let addresses = address
+        .to_socket_addrs()
+        .map_err(|_| SessionError::InvalidReadinessAddress(address.to_string()))?
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        return Err(SessionError::InvalidReadinessAddress(address.to_string()));
+    }
+
+    Ok(addresses
+        .iter()
+        .any(|address| TcpStream::connect_timeout(address, timings.tcp_connect_timeout).is_ok()))
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+fn lock_is_stale(path: &PathBuf, stale_timeout: Duration) -> bool {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age >= stale_timeout)
 }
 
 fn validate_launch_spec(spec: &CoreLaunchSpec) -> Result<(), SessionError> {
@@ -208,6 +412,33 @@ mod tests {
 
         let error = CoreProcess::start(spec).unwrap_err();
         assert!(matches!(error, SessionError::MissingExecutable(_)));
+    }
+
+    #[test]
+    fn lifecycle_state_rejects_illegal_transitions() {
+        assert!(SessionLifecycleState::Idle.can_transition_to(SessionLifecycleState::Preparing));
+        assert!(SessionLifecycleState::Starting.can_transition_to(SessionLifecycleState::Running));
+        assert!(SessionLifecycleState::Running.can_transition_to(SessionLifecycleState::Stopping));
+        assert!(!SessionLifecycleState::Running.can_transition_to(SessionLifecycleState::Starting));
+        assert!(!SessionLifecycleState::Idle.can_transition_to(SessionLifecycleState::Running));
+    }
+
+    #[test]
+    fn session_file_lock_blocks_second_owner() {
+        let lock_path = std::env::temp_dir().join(format!(
+            "poh-session-lock-test-{}-{}.lock",
+            std::process::id(),
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let first = SessionFileLock::acquire(&lock_path).unwrap();
+
+        let second = SessionFileLock::acquire(&lock_path).unwrap_err();
+
+        assert!(matches!(second, SessionError::SessionLockBusy(_)));
+        drop(first);
+        let third = SessionFileLock::acquire(&lock_path).unwrap();
+        drop(third);
+        assert!(!lock_path.exists());
     }
 
     fn verified_current_exe() -> VerifiedCore {

@@ -47,6 +47,17 @@ Date: 2026-06-18
 - Added CLI commands:
   - `poh_cli core-download-plan <core-id>`;
   - `poh_cli core-install <core-id> <executable-relative-path>`.
+- Added session lifecycle foundation:
+  - `SessionLifecycleState`;
+  - session file lock with stale-lock recovery;
+  - startup readiness probes;
+  - shared startup/stop timing model.
+- Wired desktop TrustTunnel sessions into the new lifecycle foundation:
+  - start/stop are single-instance protected;
+  - SOCKS mode uses TCP readiness instead of a blind sleep;
+  - TUN mode keeps a short delay-only startup grace;
+  - dead processes are marked `faulted` instead of silently losing session context;
+  - `session.json` writes are atomic.
 - Rewrote `InfoProject.md` and `todone_arh.md` into clean ASCII documentation.
 
 ## Verified
@@ -62,7 +73,8 @@ Date: 2026-06-18
 ## Remaining
 
 - Add core store GC for old versions and rollback retention.
-- Add `SessionManager` with strict state transitions, single-instance lock, readiness probe, watchdog, stop timeout, and rollback hooks.
+- Add long-lived watchdog/service behavior with automatic crash rollback.
+- Add system proxy rollback hooks when proxy automation is enabled.
 - Add `CoreLaunchDescriptor` so per-core executable/config/log knowledge moves out of CLI arguments.
 - Move bundled TrustTunnel into managed core store layout.
 - Add NaiveProxy as the first downloadable optional module after a pinned release is selected.

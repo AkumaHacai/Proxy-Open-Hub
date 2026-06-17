@@ -25,10 +25,11 @@ Implemented guardrails:
 - Import from Flutter is passed to Rust through stdin, so `tt://` payloads are no longer written to a temporary import file.
 - Imported profile secrets are stored in `ProtectedSecrets` using Windows DPAPI. Legacy plaintext `Secrets` are migrated on load.
 - Runtime `config.toml`, `session.json`, session logs and desktop state files receive restrictive Windows ACLs after creation.
+- Session start/stop commands are protected by a single-instance lock. Stale locks are recoverable, session writes are atomic, and missing processes are marked faulted instead of silently discarding context.
 - Import preview runs before saving; high-risk TLS/LAN warnings require explicit user confirmation.
 - Profiles with disabled TLS verification or custom certificate material get a persistent UI indicator.
 
 MVP limitation:
 
 - Signature/AuthentiCode validation is not implemented yet. The current Rust policy prepares `SignatureStatus`, but real release downloads must add signature verification or pinned publisher checks before enabling automatic installation.
-- Process lifetime is still managed by one-shot CLI commands. The current implementation verifies PID image name before stop/status, but a future long-lived service should keep a real process handle.
+- Process lifetime is still managed by one-shot CLI commands. The current implementation verifies PID image name before stop/status and records faulted sessions, but a future long-lived service should keep a real process handle and run rollback hooks immediately on crashes.

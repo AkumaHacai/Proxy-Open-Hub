@@ -384,6 +384,7 @@ dependencies = [
  "poh_core",
  "poh_core_runner",
  "poh_core_store",
+ "serde",
  "thiserror",
 ]
 
