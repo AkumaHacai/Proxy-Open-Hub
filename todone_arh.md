@@ -14,7 +14,8 @@
 - [x] A2. Добавить `active.json` и `CoreStore::active_version()` / `set_active_version()`.
 - [x] A2. Делать установленную версию активной после успешного install.
 - [x] A2. Добавить CLI `poh_cli core-list-installed`.
-- [ ] A2. Добавить zip/multifile install с zip-slip guard.
+- [x] A2. Добавить zip/multifile install с zip-slip guard.
+- [x] A2. Разделить SHA pinned archive и hashes установленных файлов для verify/tamper detection.
 - [ ] A2. Добавить GC старых версий: active + rollback.
 - [ ] A3. Добавить HTTPS downloader: только pinned GitHub asset + SHA-256 verify.
 - [ ] A4. Ввести `SessionManager` с состояниями, lock, readiness probe, watchdog.

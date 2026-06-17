@@ -156,13 +156,11 @@ fn store_smoke() -> ExitCode {
         sha256: sha256_hex(&artifact_bytes),
         signature_status: SignatureStatus::Unknown,
         installed_at_unix_ms: now_unix_ms(),
+        files: Vec::new(),
     };
     let request = CoreInstallRequest {
         manifest,
-        artifact: CoreArtifact {
-            bytes: artifact_bytes,
-            executable_relative_path: "sing-box.exe".to_string(),
-        },
+        artifact: CoreArtifact::single_file(artifact_bytes, "sing-box.exe"),
     };
     let root = env::temp_dir().join(format!("poh-store-smoke-{}", now_unix_ms()));
     let store = CoreStore::new(&root);
@@ -222,13 +220,11 @@ fn session_smoke() -> ExitCode {
         sha256: sha256_hex(&artifact_bytes),
         signature_status: SignatureStatus::Unknown,
         installed_at_unix_ms: now_unix_ms(),
+        files: Vec::new(),
     };
     let request = CoreInstallRequest {
         manifest,
-        artifact: CoreArtifact {
-            bytes: artifact_bytes,
-            executable_relative_path: "poh_cli.exe".to_string(),
-        },
+        artifact: CoreArtifact::single_file(artifact_bytes, "poh_cli.exe"),
     };
     let root = env::temp_dir().join(format!("poh-session-smoke-{}", now_unix_ms()));
     let store = CoreStore::new(&root);

@@ -1,17 +1,45 @@
-use std::fs;
+use std::collections::BTreeSet;
+use std::fs::{self, File};
+use std::io::{self, Cursor};
 use std::path::{Path, PathBuf};
 
 use poh_core::{
-    sha256_hex, CoreId, InstalledCoreManifest, InstalledCorePolicy, SecurityError,
-    TrustedCoreSource,
+    sha256_hex, CoreId, InstalledCoreFile, InstalledCoreManifest, InstalledCorePolicy,
+    SecurityError, TrustedCoreSource,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use zip::ZipArchive;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreArtifact {
     pub bytes: Vec<u8>,
     pub executable_relative_path: String,
+    pub format: CoreArtifactFormat,
+}
+
+impl CoreArtifact {
+    pub fn single_file(bytes: Vec<u8>, executable_relative_path: impl Into<String>) -> Self {
+        Self {
+            bytes,
+            executable_relative_path: executable_relative_path.into(),
+            format: CoreArtifactFormat::SingleFile,
+        }
+    }
+
+    pub fn zip_archive(bytes: Vec<u8>, executable_relative_path: impl Into<String>) -> Self {
+        Self {
+            bytes,
+            executable_relative_path: executable_relative_path.into(),
+            format: CoreArtifactFormat::ZipArchive,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CoreArtifactFormat {
+    SingleFile,
+    ZipArchive,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,17 +150,24 @@ impl CoreStore {
         }
 
         fs::create_dir_all(&plan.staging_dir)?;
-        let staged_executable = plan
-            .staging_dir
-            .join(&request.artifact.executable_relative_path);
-        let executable_parent = staged_executable.parent().ok_or_else(|| {
-            CoreStoreError::UnsafePath(request.artifact.executable_relative_path.clone())
-        })?;
-        fs::create_dir_all(executable_parent)?;
-        fs::write(&staged_executable, &request.artifact.bytes)?;
+        match request.artifact.format {
+            CoreArtifactFormat::SingleFile => {
+                stage_single_file(&plan.staging_dir, &request.artifact)?
+            }
+            CoreArtifactFormat::ZipArchive => {
+                extract_zip_archive(&plan.staging_dir, &request.artifact)?
+            }
+        }
+        let staged_executable = plan.staging_dir.join(&request.manifest.executable_path);
+        if !staged_executable.exists() {
+            return Err(CoreStoreError::CoreMissing(staged_executable));
+        }
+
+        let mut installed_manifest = request.manifest.clone();
+        installed_manifest.files = collect_installed_files(&plan.staging_dir)?;
         fs::write(
             plan.staging_dir.join("core-manifest.json"),
-            serde_json::to_vec_pretty(&request.manifest)?,
+            serde_json::to_vec_pretty(&installed_manifest)?,
         )?;
 
         let previous_install_dir = if plan.install_dir.exists() {
@@ -158,7 +193,7 @@ impl CoreStore {
         self.set_active_version(&request.manifest.core_id, &request.manifest.version)?;
 
         Ok(CoreInstallResult {
-            manifest: request.manifest.clone(),
+            manifest: installed_manifest,
             install_dir: plan.install_dir,
             executable_path: plan.executable_path,
             previous_install_dir,
@@ -296,7 +331,9 @@ impl CoreStore {
             return Err(CoreStoreError::UnsafePath(manifest.executable_path.clone()));
         }
 
-        if manifest.sha256 != "manual" {
+        if !manifest.files.is_empty() {
+            verify_installed_files(&canonical_install_dir, &manifest.files)?;
+        } else if manifest.sha256 != "manual" {
             let executable_bytes = fs::read(&canonical_executable)?;
             self.policy
                 .verify_artifact_bytes(&manifest, &executable_bytes)?;
@@ -314,6 +351,128 @@ fn active_version_path(root_dir: &Path, core_id: &CoreId) -> PathBuf {
     root_dir.join(core_id.as_str()).join("active.json")
 }
 
+fn stage_single_file(staging_dir: &Path, artifact: &CoreArtifact) -> Result<(), CoreStoreError> {
+    let staged_executable = staging_dir.join(&artifact.executable_relative_path);
+    let executable_parent = staged_executable
+        .parent()
+        .ok_or_else(|| CoreStoreError::UnsafePath(artifact.executable_relative_path.clone()))?;
+    fs::create_dir_all(executable_parent)?;
+    fs::write(&staged_executable, &artifact.bytes)?;
+    ensure_path_inside(staging_dir, &staged_executable)?;
+    Ok(())
+}
+
+fn extract_zip_archive(staging_dir: &Path, artifact: &CoreArtifact) -> Result<(), CoreStoreError> {
+    let mut archive = ZipArchive::new(Cursor::new(&artifact.bytes))?;
+    let mut names = BTreeSet::new();
+    let mut extracted_files = 0usize;
+
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        if entry.is_dir() {
+            continue;
+        }
+
+        let relative_path = entry.name().to_string();
+        validate_relative_path(&relative_path)?;
+        if !names.insert(relative_path.clone()) {
+            return Err(CoreStoreError::DuplicateArchivePath(relative_path));
+        }
+
+        let target = staging_dir.join(&relative_path);
+        let parent = target
+            .parent()
+            .ok_or_else(|| CoreStoreError::UnsafePath(relative_path.clone()))?;
+        fs::create_dir_all(parent)?;
+        let mut output = File::create(&target)?;
+        io::copy(&mut entry, &mut output)?;
+        ensure_path_inside(staging_dir, &target)?;
+        extracted_files += 1;
+    }
+
+    if extracted_files == 0 {
+        return Err(CoreStoreError::EmptyArchive);
+    }
+
+    Ok(())
+}
+
+fn collect_installed_files(staging_dir: &Path) -> Result<Vec<InstalledCoreFile>, CoreStoreError> {
+    let mut files = Vec::new();
+    collect_installed_files_inner(staging_dir, staging_dir, &mut files)?;
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
+}
+
+fn collect_installed_files_inner(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<InstalledCoreFile>,
+) -> Result<(), CoreStoreError> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_installed_files_inner(root, &path, files)?;
+            continue;
+        }
+
+        let relative = relative_path_string(root, &path)?;
+        validate_relative_path(&relative)?;
+        files.push(InstalledCoreFile {
+            sha256: sha256_hex(&fs::read(&path)?),
+            path: relative,
+        });
+    }
+
+    Ok(())
+}
+
+fn verify_installed_files(
+    install_dir: &Path,
+    files: &[InstalledCoreFile],
+) -> Result<(), CoreStoreError> {
+    for file in files {
+        validate_relative_path(&file.path)?;
+        let path = install_dir.join(&file.path);
+        if !path.exists() {
+            return Err(CoreStoreError::CoreMissing(path));
+        }
+
+        ensure_path_inside(install_dir, &path)?;
+        let actual = sha256_hex(&fs::read(&path)?);
+        if !actual.eq_ignore_ascii_case(&file.sha256) {
+            return Err(CoreStoreError::Security(SecurityError::ChecksumMismatch(
+                format!("{} expected {}, got {}", file.path, file.sha256, actual),
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_path_inside(root: &Path, path: &Path) -> Result<(), CoreStoreError> {
+    let canonical_root = root.canonicalize()?;
+    let canonical_path = path.canonicalize()?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(CoreStoreError::UnsafePath(path.display().to_string()));
+    }
+
+    Ok(())
+}
+
+fn relative_path_string(root: &Path, path: &Path) -> Result<String, CoreStoreError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| CoreStoreError::UnsafePath(path.display().to_string()))?;
+    let value = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    Ok(value)
+}
+
 #[derive(Debug, Error)]
 pub enum CoreStoreError {
     #[error(transparent)]
@@ -322,28 +481,61 @@ pub enum CoreStoreError {
     ManifestMismatch(String),
     #[error("unsafe path: {0}")]
     UnsafePath(String),
+    #[error("archive contains duplicate path: {0}")]
+    DuplicateArchivePath(String),
+    #[error("archive contains no files")]
+    EmptyArchive,
     #[error("installed core executable is missing: {0}")]
     CoreMissing(PathBuf),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Zip(#[from] zip::result::ZipError),
 }
 
 fn validate_relative_path(value: &str) -> Result<(), CoreStoreError> {
     let path = Path::new(value);
-    if value.trim().is_empty() || path.is_absolute() || value.contains('\\') {
+    if value.trim().is_empty() || path.is_absolute() || value.contains('\\') || value.contains(':')
+    {
         return Err(CoreStoreError::UnsafePath(value.to_string()));
     }
 
     for component in path.components() {
         match component {
+            std::path::Component::Normal(name)
+                if is_windows_reserved_device_name(&name.to_string_lossy()) =>
+            {
+                return Err(CoreStoreError::UnsafePath(value.to_string()));
+            }
             std::path::Component::Normal(_) => {}
             _ => return Err(CoreStoreError::UnsafePath(value.to_string())),
         }
     }
 
     Ok(())
+}
+
+fn is_windows_reserved_device_name(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end_matches(|ch| ch == ' ' || ch == '.')
+        .to_ascii_uppercase();
+
+    matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || stem
+        .strip_prefix("COM")
+        .and_then(|number| number.parse::<u8>().ok())
+        .is_some_and(|number| (1..=9).contains(&number))
+        || stem
+            .strip_prefix("LPT")
+            .and_then(|number| number.parse::<u8>().ok())
+            .is_some_and(|number| (1..=9).contains(&number))
 }
 
 fn validate_store_segment(value: &str) -> Result<(), CoreStoreError> {
@@ -362,9 +554,12 @@ fn validate_store_segment(value: &str) -> Result<(), CoreStoreError> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use poh_core::{PinnedRelease, SignatureStatus, SourceStatus, SourceType, TrustedCoreSource};
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
 
     use super::*;
 
@@ -384,25 +579,28 @@ mod tests {
             sha256: sha256_hex(&artifact_bytes),
             signature_status: SignatureStatus::Unknown,
             installed_at_unix_ms: 1,
+            files: Vec::new(),
         };
         let request = CoreInstallRequest {
             manifest: manifest.clone(),
-            artifact: CoreArtifact {
-                bytes: artifact_bytes,
-                executable_relative_path: "sing-box.exe".to_string(),
-            },
+            artifact: CoreArtifact::single_file(artifact_bytes, "sing-box.exe"),
         };
         let store = CoreStore::new(&root);
 
-        let result = store.install(&request, &trusted_sources()).unwrap();
+        let trusted_sources = trusted_sources_for(&request.manifest);
+        let result = store.install(&request, &trusted_sources).unwrap();
 
         assert!(result.executable_path.exists());
         let installed = store
             .read_installed_manifest(&CoreId::from("sing-box"), "1.0.0")
             .unwrap();
-        assert_eq!(installed, manifest);
+        assert_eq!(installed.core_id, manifest.core_id);
+        assert_eq!(installed.version, manifest.version);
+        assert_eq!(installed.sha256, manifest.sha256);
+        assert_eq!(installed.files.len(), 1);
+        assert_eq!(installed.files[0].path, "sing-box.exe");
         let verified = store
-            .verify_core(&CoreId::from("sing-box"), "1.0.0", &trusted_sources())
+            .verify_core(&CoreId::from("sing-box"), "1.0.0", &trusted_sources)
             .unwrap();
         assert_eq!(verified.manifest.core_id, CoreId::from("sing-box"));
         assert_eq!(
@@ -433,18 +631,17 @@ mod tests {
                 sha256: sha256_hex(&artifact_bytes),
                 signature_status: SignatureStatus::Unknown,
                 installed_at_unix_ms: 1,
+                files: Vec::new(),
             },
-            artifact: CoreArtifact {
-                bytes: artifact_bytes,
-                executable_relative_path: "sing-box.exe".to_string(),
-            },
+            artifact: CoreArtifact::single_file(artifact_bytes, "sing-box.exe"),
         };
         let store = CoreStore::new(&root);
-        let result = store.install(&request, &trusted_sources()).unwrap();
+        let trusted_sources = trusted_sources_for(&request.manifest);
+        let result = store.install(&request, &trusted_sources).unwrap();
         fs::write(&result.executable_path, b"tampered").unwrap();
 
         let error = store
-            .verify_core(&CoreId::from("sing-box"), "1.0.0", &trusted_sources())
+            .verify_core(&CoreId::from("sing-box"), "1.0.0", &trusted_sources)
             .unwrap_err();
         assert!(matches!(error, CoreStoreError::Security(_)));
         fs::remove_dir_all(root).unwrap();
@@ -465,17 +662,15 @@ mod tests {
             sha256: sha256_hex(b"expected"),
             signature_status: SignatureStatus::Unknown,
             installed_at_unix_ms: 1,
+            files: Vec::new(),
         };
         let request = CoreInstallRequest {
             manifest,
-            artifact: CoreArtifact {
-                bytes: b"swapped".to_vec(),
-                executable_relative_path: "sing-box.exe".to_string(),
-            },
+            artifact: CoreArtifact::single_file(b"swapped".to_vec(), "sing-box.exe"),
         };
 
         let error = CoreStore::new(&root)
-            .install(&request, &trusted_sources())
+            .install(&request, &trusted_sources_for(&request.manifest))
             .unwrap_err();
         assert!(matches!(error, CoreStoreError::Security(_)));
         if root.exists() {
@@ -499,11 +694,9 @@ mod tests {
                 sha256: sha256_hex(b"trusted"),
                 signature_status: SignatureStatus::Unknown,
                 installed_at_unix_ms: 1,
+                files: Vec::new(),
             },
-            artifact: CoreArtifact {
-                bytes: b"trusted".to_vec(),
-                executable_relative_path: "../sing-box.exe".to_string(),
-            },
+            artifact: CoreArtifact::single_file(b"trusted".to_vec(), "../sing-box.exe"),
         };
 
         let error = CoreStore::new(&root)
@@ -518,7 +711,137 @@ mod tests {
         }
     }
 
+    #[test]
+    fn store_installs_zip_artifact_with_file_hashes() {
+        let root = temp_root();
+        let archive = zip_bytes(&[
+            ("bin/sing-box.exe", b"trusted-core-binary".as_slice()),
+            ("LICENSE.txt", b"license text".as_slice()),
+        ]);
+        let manifest = InstalledCoreManifest {
+            core_id: CoreId::from("sing-box"),
+            display_name: "sing-box".to_string(),
+            version: "1.0.0".to_string(),
+            source_type: SourceType::GithubRelease,
+            owner: Some("SagerNet".to_string()),
+            repo: Some("sing-box".to_string()),
+            asset_name: "sing-box-1.0.0-windows-amd64.zip".to_string(),
+            executable_path: "bin/sing-box.exe".to_string(),
+            sha256: sha256_hex(&archive),
+            signature_status: SignatureStatus::Unknown,
+            installed_at_unix_ms: 1,
+            files: Vec::new(),
+        };
+        let request = CoreInstallRequest {
+            manifest,
+            artifact: CoreArtifact::zip_archive(archive, "bin/sing-box.exe"),
+        };
+        let store = CoreStore::new(&root);
+
+        let trusted_sources = trusted_sources_for(&request.manifest);
+        let result = store.install(&request, &trusted_sources).unwrap();
+
+        assert!(result.executable_path.exists());
+        assert_eq!(result.manifest.files.len(), 2);
+        assert!(result
+            .manifest
+            .files
+            .iter()
+            .any(|file| file.path == "bin/sing-box.exe"));
+        store
+            .verify_core(&CoreId::from("sing-box"), "1.0.0", &trusted_sources)
+            .unwrap();
+        fs::write(&result.executable_path, b"tampered").unwrap();
+        let error = store
+            .verify_core(&CoreId::from("sing-box"), "1.0.0", &trusted_sources)
+            .unwrap_err();
+        assert!(matches!(error, CoreStoreError::Security(_)));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn store_rejects_zip_slip_entries() {
+        let root = temp_root();
+        let archive = zip_bytes(&[("../escape.exe", b"trusted".as_slice())]);
+        let request = CoreInstallRequest {
+            manifest: InstalledCoreManifest {
+                core_id: CoreId::from("sing-box"),
+                display_name: "sing-box".to_string(),
+                version: "1.0.0".to_string(),
+                source_type: SourceType::GithubRelease,
+                owner: Some("SagerNet".to_string()),
+                repo: Some("sing-box".to_string()),
+                asset_name: "sing-box-1.0.0-windows-amd64.zip".to_string(),
+                executable_path: "escape.exe".to_string(),
+                sha256: sha256_hex(&archive),
+                signature_status: SignatureStatus::Unknown,
+                installed_at_unix_ms: 1,
+                files: Vec::new(),
+            },
+            artifact: CoreArtifact::zip_archive(archive, "escape.exe"),
+        };
+
+        let error = CoreStore::new(&root)
+            .install(&request, &trusted_sources_for(&request.manifest))
+            .unwrap_err();
+        assert!(matches!(error, CoreStoreError::UnsafePath(_)));
+        if root.exists() {
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn store_rejects_reserved_zip_entries() {
+        let root = temp_root();
+        let archive = zip_bytes(&[("NUL.exe", b"trusted".as_slice())]);
+        let request = CoreInstallRequest {
+            manifest: InstalledCoreManifest {
+                core_id: CoreId::from("sing-box"),
+                display_name: "sing-box".to_string(),
+                version: "1.0.0".to_string(),
+                source_type: SourceType::GithubRelease,
+                owner: Some("SagerNet".to_string()),
+                repo: Some("sing-box".to_string()),
+                asset_name: "sing-box-1.0.0-windows-amd64.zip".to_string(),
+                executable_path: "NUL.exe".to_string(),
+                sha256: sha256_hex(&archive),
+                signature_status: SignatureStatus::Unknown,
+                installed_at_unix_ms: 1,
+                files: Vec::new(),
+            },
+            artifact: CoreArtifact::zip_archive(archive, "NUL.exe"),
+        };
+
+        let error = CoreStore::new(&root)
+            .install(&request, &trusted_sources_for(&request.manifest))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            CoreStoreError::Security(_) | CoreStoreError::UnsafePath(_)
+        ));
+        if root.exists() {
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     fn trusted_sources() -> Vec<TrustedCoreSource> {
+        trusted_sources_for(&InstalledCoreManifest {
+            core_id: CoreId::from("sing-box"),
+            display_name: "sing-box".to_string(),
+            version: "1.0.0".to_string(),
+            source_type: SourceType::GithubRelease,
+            owner: Some("SagerNet".to_string()),
+            repo: Some("sing-box".to_string()),
+            asset_name: "sing-box-1.0.0-windows-amd64.zip".to_string(),
+            executable_path: "sing-box.exe".to_string(),
+            sha256: sha256_hex(b"trusted-core-binary"),
+            signature_status: SignatureStatus::Unknown,
+            installed_at_unix_ms: 1,
+            files: Vec::new(),
+        })
+    }
+
+    fn trusted_sources_for(manifest: &InstalledCoreManifest) -> Vec<TrustedCoreSource> {
         vec![TrustedCoreSource {
             core_id: CoreId::from("sing-box"),
             display_name: "sing-box".to_string(),
@@ -533,9 +856,9 @@ mod tests {
             signature_preferred: true,
             allowed_asset_patterns: vec!["sing-box-*-windows-amd64.zip".to_string()],
             pinned_release: Some(PinnedRelease {
-                version: "1.0.0".to_string(),
-                asset_name: "sing-box-1.0.0-windows-amd64.zip".to_string(),
-                sha256: sha256_hex(b"trusted-core-binary"),
+                version: manifest.version.clone(),
+                asset_name: manifest.asset_name.clone(),
+                sha256: manifest.sha256.clone(),
                 min_app_version: None,
             }),
             notes: None,
@@ -550,5 +873,20 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    fn zip_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut output = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut output);
+            let options = SimpleFileOptions::default();
+            for (path, content) in files {
+                zip.start_file(path, options).unwrap();
+                zip.write_all(content).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+
+        output.into_inner()
     }
 }

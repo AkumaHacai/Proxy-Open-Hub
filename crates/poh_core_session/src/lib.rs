@@ -155,11 +155,14 @@ fn is_safe_env_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use poh_core::{CoreId, InstalledCoreManifest, SignatureStatus, SourceType};
 
     use super::*;
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn launch_spec_uses_verified_core_path_and_runtime_args() {
@@ -209,8 +212,11 @@ mod tests {
 
     fn verified_current_exe() -> VerifiedCore {
         let executable_path = std::env::current_exe().unwrap();
+        let test_id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let install_dir = std::env::temp_dir().join(format!(
-            "poh-session-test-{}",
+            "poh-session-test-{}-{}-{}",
+            std::process::id(),
+            test_id,
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -233,6 +239,7 @@ mod tests {
                 sha256: "manual".to_string(),
                 signature_status: SignatureStatus::Unknown,
                 installed_at_unix_ms: 0,
+                files: Vec::new(),
             },
             install_dir,
             executable_path: copied_exe,

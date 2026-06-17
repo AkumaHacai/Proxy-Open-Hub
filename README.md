@@ -161,6 +161,7 @@ Implemented in the Rust + Flutter path:
 - Combined PowerShell build/check/run scripts for the Rust + Flutter app.
 - Trusted-source registry scaffold for future optional cores.
 - Core store can list installed cores and track the active version per core.
+- Core store supports zip/multifile artifacts with zip-slip guards and installed file hashes.
 - Installable GitHub-release cores now require pinned release metadata before download UI can be enabled.
 
 Still in progress:

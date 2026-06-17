@@ -73,6 +73,7 @@ scripts/run-desktop.ps1            run built app with POH_CLI_PATH
 - Проверка установленного executable на tampering.
 - Список установленных версий через `CoreStore::list_installed()`.
 - Active version на ядро через `active.json`.
+- Zip/multifile artifacts с zip-slip guard, duplicate-path rejection и hashes установленных файлов.
 
 Пока install/download UI не включен в приложение. Это следующий крупный этап.
 
@@ -221,6 +222,7 @@ apps/desktop_flutter/build/windows/x64/runner/Release/poh_cli.exe
 - Trusted-source registry и проверки fake/tampered core artifacts заложены для будущих ядер.
 - GitHub-release ядра требуют `pinned_release` перед включением install flow.
 - Core store умеет хранить active version и выводить installed cores через CLI.
+- Core store уже умеет безопасно устанавливать zip/multifile artifacts и проверять installed file hashes.
 - Секреты профилей хранятся как DPAPI `ProtectedSecrets`.
 - Import preview показывает TLS/LAN warnings до сохранения и требует подтверждение.
 

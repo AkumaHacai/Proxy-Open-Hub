@@ -81,6 +81,14 @@ pub struct InstalledCoreManifest {
     pub sha256: String,
     pub signature_status: SignatureStatus,
     pub installed_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<InstalledCoreFile>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct InstalledCoreFile {
+    pub path: String,
+    pub sha256: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -154,6 +162,23 @@ impl InstalledCorePolicy {
         }
 
         validate_relative_path(&manifest.executable_path)?;
+        for file in &manifest.files {
+            validate_relative_path(&file.path)?;
+            validate_sha256_hex(&file.sha256)?;
+        }
+
+        if !manifest.files.is_empty()
+            && !manifest
+                .files
+                .iter()
+                .any(|file| file.path == manifest.executable_path)
+        {
+            return Err(SecurityError::UntrustedInstalledCore(format!(
+                "{} installed file list does not include executable",
+                manifest.core_id
+            )));
+        }
+
         if manifest.version.trim().is_empty() {
             return Err(SecurityError::UntrustedInstalledCore(format!(
                 "{} version is empty",
@@ -765,6 +790,7 @@ mod tests {
             sha256: "0".repeat(64),
             signature_status: SignatureStatus::Unknown,
             installed_at_unix_ms: 0,
+            files: Vec::new(),
         };
 
         let error = InstalledCorePolicy::default()
@@ -809,6 +835,7 @@ mod tests {
             sha256: sha256_hex(artifact),
             signature_status: SignatureStatus::Unknown,
             installed_at_unix_ms: 0,
+            files: Vec::new(),
         };
 
         let policy = InstalledCorePolicy::default();
@@ -830,6 +857,7 @@ mod tests {
             sha256: "0".repeat(64),
             signature_status: SignatureStatus::Unknown,
             installed_at_unix_ms: 0,
+            files: Vec::new(),
         };
 
         let error = InstalledCorePolicy::default()
@@ -900,6 +928,7 @@ mod tests {
             sha256: sha256_hex(artifact),
             signature_status: SignatureStatus::Unknown,
             installed_at_unix_ms: 0,
+            files: Vec::new(),
         };
 
         let error = InstalledCorePolicy::default()

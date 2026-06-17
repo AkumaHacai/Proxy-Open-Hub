@@ -16,8 +16,8 @@ pub use model::{
 };
 pub use registry::{CoreDetection, CoreRegistry};
 pub use security::{
-    sha256_hex, InstalledCoreManifest, InstalledCorePolicy, PinnedRelease, Redactor,
-    RuntimeSecurityPolicy, SecurityError, SignatureStatus, SourceStatus, SourceType,
+    sha256_hex, InstalledCoreFile, InstalledCoreManifest, InstalledCorePolicy, PinnedRelease,
+    Redactor, RuntimeSecurityPolicy, SecurityError, SignatureStatus, SourceStatus, SourceType,
     TrustedCoreSource, TrustedSourcePolicy,
 };
 pub use trusttunnel::TrustTunnelAdapter;
