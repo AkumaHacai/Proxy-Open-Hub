@@ -75,9 +75,10 @@ the managed core store.
 - [x] Add `NaiveProxyAdapter` to `poh_core`.
 - [x] Import `config.json` and proxy URLs without storing plaintext passwords in profiles.
 - [x] Materialize `config.json` through secret placeholders + runner secret allowlist.
-- [ ] Wire NaiveProxy desktop profile import/storage through the generic DPAPI state path.
+- [x] Wire NaiveProxy desktop profile import/storage through the generic DPAPI state path.
 - [ ] Wire install flow through catalog/store/downloader.
-- [ ] Add LocalProxy readiness probe and system proxy rollback.
+- [x] Add LocalProxy readiness probe for NaiveProxy.
+- [ ] Add system proxy ownership/rollback.
 
 ## Already Connected To Earlier Work
 
@@ -112,11 +113,14 @@ Recommended order:
     extracts `proxy.password` / `listen.password` into secret candidates, keeps
     plaintext passwords out of `core_config`, and materializes `config.json`
     through placeholders accepted by `poh_core_runner`.
-  - remaining new code: generic desktop profile storage/import for non-TUN
-    cores, LocalProxy readiness probe wiring, system-proxy ownership/rollback,
-    and the real pinned catalog entry. Do NOT store the proxy password in the
-    profile; URL-encode it in the secret value (see the security note in the
-    integration doc).
+  - generic desktop bridge: DONE. Non-TUN profiles can now persist as
+    `CoreId` + opaque `CoreConfig` + `SecretRefs`, with DPAPI-protected secret
+    values in the same desktop state.
+  - LocalProxy readiness: DONE for NaiveProxy. Startup probes the imported
+    `listen` host/port instead of sleeping.
+  - remaining new code: system-proxy ownership/rollback and the real pinned
+    catalog entry. Do NOT store the proxy password in the profile; URL-encode it
+    in the secret value (see the security note in the integration doc).
 
 2. **Process lifecycle hardening (connect/disconnect/safe process control)** -
    full plan in `LLM_Cloud/process-lifecycle.md`. This is the riskiest area:

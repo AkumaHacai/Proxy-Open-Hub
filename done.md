@@ -150,9 +150,15 @@ See `LLM_Cloud/process-lifecycle.md` (section 13, P1) for the full design.
 - Tests added for detection, import, plaintext avoidance, placeholder runtime
   generation, runner substitution, registry detection, and URL userinfo
   redaction.
+- Added the desktop-state bridge for non-TrustTunnel cores:
+  - profiles can persist as `CoreId` + opaque adapter-owned `CoreConfig` +
+    `SecretRefs`;
+  - imported NaiveProxy secrets go through the same DPAPI `ProtectedSecrets`
+    map;
+  - materialization selects the adapter by `core_id` from `CoreRegistry`;
+  - NaiveProxy startup readiness probes the local listener host/port.
 - Remaining Phase C: choose/pin a real NaiveProxy release, enable the catalog
-  install path, add generic desktop profile storage/import for non-TUN cores,
-  wire LocalProxy readiness, and add system-proxy ownership/rollback.
+  install path, and add system-proxy ownership/rollback.
 
 ## UI Pass 1 - Settings layout fix, routing skeleton, motion tokens
 
@@ -176,7 +182,7 @@ Full plan/notes in `LLM_Cloud/ui-layout-and-animation.md` (section 8).
 ## Verified
 
 - `cargo fmt --all` / `cargo fmt --all --check` (clean)
-- `cargo test --workspace` (63 tests pass)
+- `cargo test --workspace` (64 tests pass)
 - `cargo build --workspace`
 - `cargo clippy --workspace` (clean)
 - Earlier security/Phase A pass also verified:
@@ -193,7 +199,7 @@ Full plan/notes in `LLM_Cloud/ui-layout-and-animation.md` (section 8).
 - Add long-lived watchdog/service behavior with automatic crash rollback.
 - Add system proxy rollback hooks when proxy automation is enabled.
 - Finish NaiveProxy as the first downloadable optional module after a pinned release is selected
-  (adapter is ready; pinned catalog entry + generic desktop profile/import + LocalProxy readiness remain).
+  (adapter + desktop profile bridge are ready; pinned catalog entry + install enablement remain).
 - Add signature/AuthentiCode or publisher validation before enabling automatic install/update UI.
 
 Done since last list: bundled TrustTunnel is now resolved from and provisioned

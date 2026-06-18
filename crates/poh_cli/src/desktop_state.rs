@@ -9,11 +9,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose, Engine as _};
 use poh_core::{
-    sha256_hex, CoreAdapter, CoreId, EndpointConfig, ImportInput, InstalledCoreFile,
-    InstalledCoreManifest, ListenerConfig, ListenerMode, LogLevel, Profile, ProfileId, Redactor,
-    RoutingMode, RoutingProfile, SignatureStatus, SocksConfig, SourceType, TrustTunnelAdapter,
-    TrustTunnelConfig, TrustTunnelCoreProfile, TrustedCoreSource, TrustedSourcePolicy, TunConfig,
-    UpstreamProtocol, ValidationWarning,
+    sha256_hex, CoreId, CoreRegistry, EndpointConfig, ImportInput, InstalledCoreFile,
+    InstalledCoreManifest, ListenerConfig, ListenerMode, LogLevel, NaiveProxyAdapter,
+    NaiveProxyCoreProfile, Profile, ProfileId, Redactor, RoutingMode, RoutingProfile,
+    SignatureStatus, SocksConfig, SourceType, TrustTunnelAdapter, TrustTunnelConfig,
+    TrustTunnelCoreProfile, TrustedCoreSource, TrustedSourcePolicy, TunConfig, UpstreamProtocol,
+    ValidationWarning,
 };
 use poh_core_runner::{MapSecretResolver, MaterializedRuntime, RuntimeMaterializer};
 use poh_core_session::{
@@ -123,6 +124,13 @@ const BUNDLED_TRUSTTUNNEL_SHA256: &str =
 const BUNDLED_WINTUN_SHA256: &str =
     "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce";
 
+fn desktop_core_registry() -> CoreRegistry {
+    let mut registry = CoreRegistry::new();
+    registry.register(TrustTunnelAdapter::new());
+    registry.register(NaiveProxyAdapter::new());
+    registry
+}
+
 pub fn build_desktop_session_plan(
     state_path: &Path,
     profile_id: &str,
@@ -184,13 +192,9 @@ pub fn start_desktop_session(
         restrict_runtime_permissions(path)?;
     }
     let config_path = written
-        .iter()
-        .find(|path| {
-            path.file_name()
-                .is_some_and(|name| name.eq_ignore_ascii_case("config.toml"))
-        })
+        .first()
         .cloned()
-        .ok_or_else(|| DesktopStateError::RuntimeConfigMissing("config.toml".to_string()))?;
+        .ok_or_else(|| DesktopStateError::RuntimeConfigMissing("runtime config".to_string()))?;
     let log_path = launch_descriptor
         .log_path(&runtime_dir)
         .unwrap_or_else(|| runtime_dir.join("core.log"));
@@ -464,22 +468,24 @@ pub fn import_desktop_profile(input: &str) -> Result<DesktopImportResult, Deskto
         return Err(DesktopStateError::ImportTooLarge(input.len()));
     }
 
-    let adapter = TrustTunnelAdapter::new();
-    let parsed = adapter.parse_profile(&ImportInput::text(input.to_string()))?;
+    let registry = desktop_core_registry();
+    let import_input = ImportInput::text(input.to_string());
+    let detections = registry.detect_import(&import_input);
+    let detection = detections
+        .first()
+        .ok_or(poh_core::AdapterError::UnsupportedInput)?;
+    let adapter = registry
+        .adapter(&detection.core_id)
+        .ok_or_else(|| DesktopStateError::CoreAdapterNotFound(detection.core_id.to_string()))?;
+    let parsed = adapter.parse_profile(&import_input)?;
     let warnings = parsed.warnings.clone();
-    let core_profile =
-        serde_json::from_value::<TrustTunnelCoreProfile>(parsed.profile.core_config)?;
     let state_path = default_desktop_state_file();
     let mut state = load_or_default_desktop_state(&state_path)?;
     let profile_id = unique_profile_id(parsed.profile.id.as_str(), &state);
-    let profile_name = parsed.profile.name;
+    let profile_name = parsed.profile.name.clone();
+    let core_id = parsed.profile.core_id.to_string();
     let secrets_imported = parsed.secrets.len();
-    let (desktop_profile, secrets) = desktop_profile_from_import(
-        profile_id.clone(),
-        profile_name.clone(),
-        core_profile,
-        parsed.secrets,
-    );
+    let (desktop_profile, secrets) = desktop_profile_from_import(profile_id.clone(), parsed)?;
 
     state.profiles.push(desktop_profile);
     state.insert_protected_secrets(secrets)?;
@@ -488,7 +494,7 @@ pub fn import_desktop_profile(input: &str) -> Result<DesktopImportResult, Deskto
     Ok(DesktopImportResult {
         profile_id,
         profile_name,
-        core_id: "trusttunnel".to_string(),
+        core_id,
         state_path: state_path.display().to_string(),
         secrets_imported,
         warnings,
@@ -500,12 +506,20 @@ pub fn preview_desktop_profile(input: &str) -> Result<DesktopImportPreview, Desk
         return Err(DesktopStateError::ImportTooLarge(input.len()));
     }
 
-    let adapter = TrustTunnelAdapter::new();
-    let parsed = adapter.parse_profile(&ImportInput::text(input.to_string()))?;
+    let registry = desktop_core_registry();
+    let import_input = ImportInput::text(input.to_string());
+    let detections = registry.detect_import(&import_input);
+    let detection = detections
+        .first()
+        .ok_or(poh_core::AdapterError::UnsupportedInput)?;
+    let adapter = registry
+        .adapter(&detection.core_id)
+        .ok_or_else(|| DesktopStateError::CoreAdapterNotFound(detection.core_id.to_string()))?;
+    let parsed = adapter.parse_profile(&import_input)?;
 
     Ok(DesktopImportPreview {
         profile_name: parsed.profile.name,
-        core_id: "trusttunnel".to_string(),
+        core_id: parsed.profile.core_id.to_string(),
         secrets_detected: parsed.secrets.len(),
         warnings: parsed.warnings,
     })
@@ -552,6 +566,25 @@ fn save_desktop_state(state_path: &Path, state: &DesktopState) -> Result<(), Des
 
 fn desktop_profile_from_import(
     profile_id: String,
+    parsed: poh_core::ParsedProfile,
+) -> Result<(DesktopProfile, BTreeMap<String, String>), DesktopStateError> {
+    if parsed.profile.core_id == CoreId::from("trusttunnel") {
+        let profile_name = parsed.profile.name.clone();
+        let core_profile =
+            serde_json::from_value::<TrustTunnelCoreProfile>(parsed.profile.core_config)?;
+        return Ok(desktop_profile_from_trusttunnel_import(
+            profile_id,
+            profile_name,
+            core_profile,
+            parsed.secrets,
+        ));
+    }
+
+    Ok(desktop_profile_from_generic_import(profile_id, parsed))
+}
+
+fn desktop_profile_from_trusttunnel_import(
+    profile_id: String,
     profile_name: String,
     core_profile: TrustTunnelCoreProfile,
     imported_secrets: BTreeMap<String, String>,
@@ -587,6 +620,9 @@ fn desktop_profile_from_import(
         DesktopProfile {
             id: profile_id,
             display_name: profile_name,
+            core_id: "trusttunnel".to_string(),
+            core_config: None,
+            secret_refs: BTreeMap::new(),
             endpoint: DesktopEndpoint {
                 hostname: endpoint.hostname,
                 custom_sni: endpoint.custom_sni,
@@ -639,6 +675,35 @@ fn desktop_profile_from_import(
     )
 }
 
+fn desktop_profile_from_generic_import(
+    profile_id: String,
+    parsed: poh_core::ParsedProfile,
+) -> (DesktopProfile, BTreeMap<String, String>) {
+    let mut protected_secrets = BTreeMap::new();
+    let mut secret_refs = BTreeMap::new();
+    for (key, value) in parsed.secrets {
+        if value.trim().is_empty() {
+            continue;
+        }
+
+        let secret_ref = format!("secret://{profile_id}/{key}");
+        secret_refs.insert(key, secret_ref.clone());
+        protected_secrets.insert(secret_ref, value);
+    }
+
+    (
+        DesktopProfile {
+            id: profile_id,
+            display_name: parsed.profile.name,
+            core_id: parsed.profile.core_id.to_string(),
+            core_config: Some(parsed.profile.core_config),
+            secret_refs,
+            ..DesktopProfile::default()
+        },
+        protected_secrets,
+    )
+}
+
 fn import_secret_ref(
     profile_id: &str,
     key: &str,
@@ -683,9 +748,12 @@ fn build_materialized_session(
     desktop_profile: DesktopProfile,
     secrets: &BTreeMap<String, String>,
 ) -> Result<(Profile, MaterializedRuntime, String), DesktopStateError> {
-    let adapter = TrustTunnelAdapter::new();
+    let registry = desktop_core_registry();
+    let profile = desktop_profile.clone().into_profile()?;
+    let adapter = registry
+        .adapter(&profile.core_id)
+        .ok_or_else(|| DesktopStateError::CoreAdapterNotFound(profile.core_id.to_string()))?;
     let secret_values = secret_resolver_values(&desktop_profile, secrets)?;
-    let profile = desktop_profile.into_profile()?;
     let runtime_config = adapter.build_runtime_config(&profile)?;
     let resolver = MapSecretResolver::new(secret_values);
     let materialized = RuntimeMaterializer::default().materialize(&runtime_config, &resolver)?;
@@ -698,6 +766,14 @@ fn secret_resolver_values(
     profile: &DesktopProfile,
     secrets: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, DesktopStateError> {
+    if profile.core_config.is_some() {
+        return profile
+            .secret_refs
+            .iter()
+            .map(|(key, secret_ref)| Ok((key.clone(), read_optional_secret(secrets, secret_ref)?)))
+            .collect();
+    }
+
     let mut values = BTreeMap::new();
     values.insert(
         "endpoint.password".to_string(),
@@ -753,6 +829,8 @@ pub enum DesktopStateError {
     SecretProtection(String),
     #[error("desktop session is already running with pid {0}")]
     SessionAlreadyRunning(u32),
+    #[error("core adapter is not registered: {0}")]
+    CoreAdapterNotFound(String),
     #[error("TrustTunnel client executable was not found")]
     CoreExecutableNotFound,
     #[error("invalid TrustTunnel client executable path: {0}")]
@@ -1062,6 +1140,10 @@ fn clear_persisted_session(
 }
 
 fn startup_probe_for_profile(profile: &DesktopProfile) -> SessionStartupProbe {
+    if let Some(probe) = startup_probe_for_generic_profile(profile) {
+        return probe;
+    }
+
     if profile.listener.mode == 1 {
         let address = profile.listener.socks.address.trim();
         if !address.is_empty() {
@@ -1070,6 +1152,30 @@ fn startup_probe_for_profile(profile: &DesktopProfile) -> SessionStartupProbe {
     }
 
     SessionStartupProbe::DelayOnly
+}
+
+fn startup_probe_for_generic_profile(profile: &DesktopProfile) -> Option<SessionStartupProbe> {
+    if profile.core_id != "naiveproxy" {
+        return None;
+    }
+
+    let core_config = profile.core_config.clone()?;
+    let core_profile = serde_json::from_value::<NaiveProxyCoreProfile>(core_config).ok()?;
+    let port = core_profile.config.listen.port?;
+    let host = core_profile.config.listen.host.trim();
+    if host.is_empty() {
+        return None;
+    }
+
+    Some(SessionStartupProbe::tcp(format_socket_address(host, port)))
+}
+
+fn format_socket_address(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 fn startup_timings_for_probe(probe: &SessionStartupProbe) -> SessionTimings {
@@ -1681,6 +1787,20 @@ struct DesktopProfile {
     id: String,
     #[serde(rename = "DisplayName", default)]
     display_name: String,
+    #[serde(rename = "CoreId", default, skip_serializing_if = "String::is_empty")]
+    core_id: String,
+    #[serde(
+        rename = "CoreConfig",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    core_config: Option<serde_json::Value>,
+    #[serde(
+        rename = "SecretRefs",
+        default,
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    secret_refs: BTreeMap<String, String>,
     #[serde(rename = "Endpoint", default)]
     endpoint: DesktopEndpoint,
     #[serde(rename = "Routing", default)]
@@ -1691,6 +1811,28 @@ struct DesktopProfile {
 
 impl DesktopProfile {
     fn into_profile(self) -> Result<Profile, DesktopStateError> {
+        if let Some(core_config) = self.core_config {
+            let core_id = if self.core_id.trim().is_empty() {
+                return Err(DesktopStateError::CoreAdapterNotFound(
+                    "missing profile CoreId".to_string(),
+                ));
+            } else {
+                CoreId::from(self.core_id.as_str())
+            };
+            let name = if self.display_name.trim().is_empty() {
+                core_id.to_string()
+            } else {
+                self.display_name
+            };
+
+            return Ok(Profile::new(
+                ProfileId::new(self.id),
+                name,
+                core_id,
+                core_config,
+            ));
+        }
+
         let name = if self.display_name.trim().is_empty() {
             self.endpoint.hostname.clone()
         } else {
@@ -1933,6 +2075,7 @@ fn listener_mode_to_desktop(value: ListenerMode) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use poh_core::CoreAdapter;
 
     fn sample_session(pid: u32, creation_time_100ns: u64) -> PersistedDesktopSession {
         PersistedDesktopSession {
@@ -2134,12 +2277,16 @@ mod tests {
             },
         };
 
-        let (profile, secrets) = desktop_profile_from_import(
-            "profile-1".to_string(),
-            "tt.example.test".to_string(),
-            core_profile,
-            imported_secrets,
-        );
+        let mut parsed = poh_core::ParsedProfile::new(Profile::new(
+            ProfileId::new("trusttunnel:tt-example-test"),
+            "tt.example.test",
+            CoreId::from("trusttunnel"),
+            serde_json::to_value(core_profile).unwrap(),
+        ));
+        parsed.secrets = imported_secrets;
+
+        let (profile, secrets) =
+            desktop_profile_from_import("profile-1".to_string(), parsed).unwrap();
 
         assert_eq!(profile.id, "profile-1");
         assert_eq!(profile.listener.mode, 1);
@@ -2158,6 +2305,44 @@ mod tests {
         assert_eq!(
             secrets.get("secret://profile-1/endpoint.client_random"),
             Some(&"random-token".to_string())
+        );
+    }
+
+    #[test]
+    fn naiveproxy_import_uses_generic_profile_and_secret_refs() {
+        let adapter = NaiveProxyAdapter::new();
+        let parsed = adapter
+            .parse_profile(&ImportInput::text(
+                "https://naive%20user:p%40ss%3Aword@example.com:8443",
+            ))
+            .unwrap();
+        let (profile, secrets) =
+            desktop_profile_from_import("naive-1".to_string(), parsed).unwrap();
+
+        assert_eq!(profile.id, "naive-1");
+        assert_eq!(profile.core_id, "naiveproxy");
+        assert!(profile.core_config.is_some());
+        assert_eq!(
+            profile.secret_refs.get("proxy.password"),
+            Some(&"secret://naive-1/proxy.password".to_string())
+        );
+        assert_eq!(
+            secrets.get("secret://naive-1/proxy.password"),
+            Some(&"p%40ss%3Aword".to_string())
+        );
+
+        let (runtime_profile, materialized, redacted_preview) =
+            build_materialized_session(profile.clone(), &secrets).unwrap();
+
+        assert_eq!(runtime_profile.core_id, CoreId::from("naiveproxy"));
+        assert_eq!(materialized.command_args, ["config.json"]);
+        assert!(materialized.files[0]
+            .content
+            .contains("https://naive%20user:p%40ss%3Aword@example.com:8443"));
+        assert!(!redacted_preview.contains("p%40ss%3Aword"));
+        assert_eq!(
+            startup_probe_for_profile(&profile),
+            SessionStartupProbe::tcp("127.0.0.1:1080")
         );
     }
 
