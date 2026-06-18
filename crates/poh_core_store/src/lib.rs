@@ -12,6 +12,7 @@ use thiserror::Error;
 use zip::ZipArchive;
 
 pub const DEFAULT_MAX_CORE_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
+pub const DEFAULT_INACTIVE_VERSION_RETENTION: usize = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreArtifact {
@@ -239,6 +240,15 @@ pub struct CoreInstallResult {
     pub previous_install_dir: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CoreGcResult {
+    pub core_id: CoreId,
+    pub active_version: Option<String>,
+    pub retained_versions: Vec<String>,
+    pub removed_versions: Vec<String>,
+    pub removed_dirs: Vec<PathBuf>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedCore {
     pub manifest: InstalledCoreManifest,
@@ -277,8 +287,6 @@ impl CoreStore {
         &self,
         request: &CoreInstallRequest,
     ) -> Result<CoreInstallPlan, CoreStoreError> {
-        validate_store_segment(request.manifest.core_id.as_str())?;
-        validate_store_segment(&request.manifest.version)?;
         validate_relative_path(&request.artifact.executable_relative_path)?;
         if request.artifact.executable_relative_path != request.manifest.executable_path {
             return Err(CoreStoreError::ManifestMismatch(
@@ -286,19 +294,36 @@ impl CoreStore {
             ));
         }
 
-        let core_dir = self.root_dir.join(request.manifest.core_id.as_str());
-        let install_dir = core_dir.join(&request.manifest.version);
-        let staging_dir = core_dir.join(format!(".staging-{}", request.manifest.version));
+        self.plan_paths(
+            &request.manifest.core_id,
+            &request.manifest.version,
+            &request.manifest.executable_path,
+        )
+    }
+
+    fn plan_paths(
+        &self,
+        core_id: &CoreId,
+        version: &str,
+        executable_path: &str,
+    ) -> Result<CoreInstallPlan, CoreStoreError> {
+        validate_store_segment(core_id.as_str())?;
+        validate_store_segment(version)?;
+        validate_relative_path(executable_path)?;
+
+        let core_dir = self.root_dir.join(core_id.as_str());
+        let install_dir = core_dir.join(version);
+        let staging_dir = core_dir.join(format!(".staging-{version}"));
         let manifest_path = install_dir.join("core-manifest.json");
-        let executable_path = install_dir.join(&request.manifest.executable_path);
+        let executable_full = install_dir.join(executable_path);
 
         Ok(CoreInstallPlan {
-            core_id: request.manifest.core_id.clone(),
-            version: request.manifest.version.clone(),
+            core_id: core_id.clone(),
+            version: version.to_string(),
             install_dir,
             staging_dir,
             manifest_path,
-            executable_path,
+            executable_path: executable_full,
         })
     }
 
@@ -318,11 +343,7 @@ impl CoreStore {
         }
 
         let plan = self.plan_install(request)?;
-        if plan.staging_dir.exists() {
-            fs::remove_dir_all(&plan.staging_dir)?;
-        }
-
-        fs::create_dir_all(&plan.staging_dir)?;
+        self.reset_staging(&plan)?;
         match request.artifact.format {
             CoreArtifactFormat::SingleFile => {
                 stage_single_file(&plan.staging_dir, &request.artifact)?
@@ -338,6 +359,86 @@ impl CoreStore {
 
         let mut installed_manifest = request.manifest.clone();
         installed_manifest.files = collect_installed_files(&plan.staging_dir)?;
+        self.promote_staged(&plan, installed_manifest)
+    }
+
+    /// Install a locally bundled, multi-file core (e.g. the shipped TrustTunnel
+    /// runtime) into the managed store layout. The manifest must use the
+    /// `"manual"` sha256 sentinel and pin a per-file SHA-256 list; each file is
+    /// copied from `source_dir` only after its bytes match the pinned hash, so
+    /// a bundled core is held to the same integrity bar as a downloaded one.
+    pub fn install_manual_bundle(
+        &self,
+        manifest: &InstalledCoreManifest,
+        source_dir: &Path,
+        trusted_sources: &[TrustedCoreSource],
+    ) -> Result<CoreInstallResult, CoreStoreError> {
+        if manifest.sha256 != "manual" {
+            return Err(CoreStoreError::ManifestMismatch(
+                "manual bundle manifest must use \"manual\" sha256".to_string(),
+            ));
+        }
+        if manifest.files.is_empty() {
+            return Err(CoreStoreError::ManifestMismatch(
+                "manual bundle manifest must pin file hashes".to_string(),
+            ));
+        }
+        self.policy.validate_manifest(manifest, trusted_sources)?;
+
+        let plan = self.plan_paths(
+            &manifest.core_id,
+            &manifest.version,
+            &manifest.executable_path,
+        )?;
+        self.reset_staging(&plan)?;
+
+        for file in &manifest.files {
+            validate_relative_path(&file.path)?;
+            let source_path = source_dir.join(&file.path);
+            if !source_path.exists() {
+                return Err(CoreStoreError::CoreMissing(source_path));
+            }
+
+            let bytes = fs::read(&source_path)?;
+            let actual = sha256_hex(&bytes);
+            if !actual.eq_ignore_ascii_case(&file.sha256) {
+                return Err(CoreStoreError::Security(SecurityError::ChecksumMismatch(
+                    format!("{} expected {}, got {}", file.path, file.sha256, actual),
+                )));
+            }
+
+            let target = plan.staging_dir.join(&file.path);
+            let parent = target
+                .parent()
+                .ok_or_else(|| CoreStoreError::UnsafePath(file.path.clone()))?;
+            fs::create_dir_all(parent)?;
+            fs::write(&target, &bytes)?;
+            ensure_path_inside(&plan.staging_dir, &target)?;
+        }
+
+        let staged_executable = plan.staging_dir.join(&manifest.executable_path);
+        if !staged_executable.exists() {
+            return Err(CoreStoreError::CoreMissing(staged_executable));
+        }
+
+        let mut installed_manifest = manifest.clone();
+        installed_manifest.files = collect_installed_files(&plan.staging_dir)?;
+        self.promote_staged(&plan, installed_manifest)
+    }
+
+    fn reset_staging(&self, plan: &CoreInstallPlan) -> Result<(), CoreStoreError> {
+        if plan.staging_dir.exists() {
+            fs::remove_dir_all(&plan.staging_dir)?;
+        }
+        fs::create_dir_all(&plan.staging_dir)?;
+        Ok(())
+    }
+
+    fn promote_staged(
+        &self,
+        plan: &CoreInstallPlan,
+        installed_manifest: InstalledCoreManifest,
+    ) -> Result<CoreInstallResult, CoreStoreError> {
         fs::write(
             plan.staging_dir.join("core-manifest.json"),
             serde_json::to_vec_pretty(&installed_manifest)?,
@@ -363,12 +464,13 @@ impl CoreStore {
             return Err(CoreStoreError::Io(error));
         }
 
-        self.set_active_version(&request.manifest.core_id, &request.manifest.version)?;
+        self.set_active_version(&plan.core_id, &plan.version)?;
+        self.garbage_collect_old_versions(&plan.core_id, DEFAULT_INACTIVE_VERSION_RETENTION)?;
 
         Ok(CoreInstallResult {
             manifest: installed_manifest,
-            install_dir: plan.install_dir,
-            executable_path: plan.executable_path,
+            install_dir: plan.install_dir.clone(),
+            executable_path: plan.executable_path.clone(),
             previous_install_dir,
         })
     }
@@ -481,6 +583,76 @@ impl CoreStore {
         Ok(installed)
     }
 
+    /// Remove old installed versions for one core while always keeping the
+    /// active version plus the newest `inactive_retention` inactive versions.
+    ///
+    /// Only directories that look like installed versions (valid segment +
+    /// `core-manifest.json`) are considered. Staging directories and unknown
+    /// files are ignored so a failed install can be diagnosed instead of being
+    /// silently erased by GC.
+    pub fn garbage_collect_old_versions(
+        &self,
+        core_id: &CoreId,
+        inactive_retention: usize,
+    ) -> Result<CoreGcResult, CoreStoreError> {
+        validate_store_segment(core_id.as_str())?;
+        let active_version = self.active_version(core_id)?;
+        let core_dir = self.root_dir.join(core_id.as_str());
+        if !core_dir.exists() {
+            return Ok(CoreGcResult {
+                core_id: core_id.clone(),
+                active_version,
+                retained_versions: Vec::new(),
+                removed_versions: Vec::new(),
+                removed_dirs: Vec::new(),
+            });
+        }
+
+        let mut installed = self.installed_version_dirs(core_id)?;
+        installed.sort_by(|left, right| {
+            right
+                .manifest
+                .installed_at_unix_ms
+                .cmp(&left.manifest.installed_at_unix_ms)
+                .then_with(|| right.directory_name.cmp(&left.directory_name))
+        });
+
+        let mut retained = BTreeSet::new();
+        if let Some(active) = &active_version {
+            retained.insert(active.clone());
+        }
+
+        let newest_inactive = installed
+            .iter()
+            .filter(|version| !retained.contains(&version.directory_name))
+            .take(inactive_retention)
+            .map(|version| version.directory_name.clone())
+            .collect::<Vec<_>>();
+        for version in newest_inactive {
+            retained.insert(version);
+        }
+
+        let mut removed_versions = Vec::new();
+        let mut removed_dirs = Vec::new();
+        for version in installed {
+            if retained.contains(&version.directory_name) {
+                continue;
+            }
+
+            fs::remove_dir_all(&version.install_dir)?;
+            removed_versions.push(version.directory_name);
+            removed_dirs.push(version.install_dir);
+        }
+
+        Ok(CoreGcResult {
+            core_id: core_id.clone(),
+            active_version,
+            retained_versions: retained.into_iter().collect(),
+            removed_versions,
+            removed_dirs,
+        })
+    }
+
     pub fn verify_core(
         &self,
         core_id: &CoreId,
@@ -518,6 +690,56 @@ impl CoreStore {
             executable_path: canonical_executable,
         })
     }
+
+    fn installed_version_dirs(
+        &self,
+        core_id: &CoreId,
+    ) -> Result<Vec<InstalledVersionDir>, CoreStoreError> {
+        validate_store_segment(core_id.as_str())?;
+        let core_dir = self.root_dir.join(core_id.as_str());
+        if !core_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut installed = Vec::new();
+        for entry in fs::read_dir(core_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+
+            let directory_name = entry.file_name().to_string_lossy().to_string();
+            if directory_name.starts_with('.') || validate_store_segment(&directory_name).is_err() {
+                continue;
+            }
+
+            let manifest_path = entry.path().join("core-manifest.json");
+            if !manifest_path.exists() {
+                continue;
+            }
+
+            let manifest =
+                serde_json::from_str::<InstalledCoreManifest>(&fs::read_to_string(manifest_path)?)?;
+            if manifest.core_id != *core_id {
+                continue;
+            }
+
+            installed.push(InstalledVersionDir {
+                directory_name,
+                manifest,
+                install_dir: entry.path(),
+            });
+        }
+
+        Ok(installed)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InstalledVersionDir {
+    directory_name: String,
+    manifest: InstalledCoreManifest,
+    install_dir: PathBuf,
 }
 
 fn active_version_path(root_dir: &Path, core_id: &CoreId) -> PathBuf {
@@ -722,7 +944,7 @@ fn is_windows_reserved_device_name(name: &str) -> bool {
         .split('.')
         .next()
         .unwrap_or(name)
-        .trim_end_matches(|ch| ch == ' ' || ch == '.')
+        .trim_end_matches([' ', '.'])
         .to_ascii_uppercase();
 
     matches!(
@@ -811,6 +1033,40 @@ mod tests {
         assert_eq!(installed.len(), 1);
         assert!(installed[0].active);
         assert_eq!(installed[0].manifest.version, "1.0.0");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn store_gc_keeps_active_and_newest_inactive_version() {
+        let root = temp_root();
+        let core_id = CoreId::from("sing-box");
+        let store = CoreStore::new(&root);
+
+        install_test_version(&store, "1.0.0", 1);
+        install_test_version(&store, "1.1.0", 2);
+        install_test_version(&store, "1.2.0", 3);
+
+        let core_dir = root.join("sing-box");
+        assert!(!core_dir.join("1.0.0").exists());
+        assert!(core_dir.join("1.1.0").exists());
+        assert!(core_dir.join("1.2.0").exists());
+        assert_eq!(
+            store.active_version(&core_id).unwrap(),
+            Some("1.2.0".to_string())
+        );
+
+        let installed = store.list_installed().unwrap();
+        let versions = installed
+            .iter()
+            .map(|core| (core.manifest.version.as_str(), core.active))
+            .collect::<Vec<_>>();
+        assert_eq!(versions, vec![("1.1.0", false), ("1.2.0", true)]);
+
+        let gc = store.garbage_collect_old_versions(&core_id, 0).unwrap();
+        assert_eq!(gc.removed_versions, vec!["1.1.0".to_string()]);
+        assert!(!core_dir.join("1.1.0").exists());
+        assert!(core_dir.join("1.2.0").exists());
+
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1130,6 +1386,111 @@ mod tests {
         assert!(matches!(error, CoreStoreError::Security(_)));
     }
 
+    #[test]
+    fn store_installs_manual_bundle_with_pinned_file_hashes() {
+        let root = temp_root();
+        let source_dir = temp_root();
+        fs::create_dir_all(&source_dir).unwrap();
+        let exe_bytes = b"trusttunnel-binary".as_slice();
+        let dll_bytes = b"wintun-binary".as_slice();
+        fs::write(source_dir.join("trusttunnel_client.exe"), exe_bytes).unwrap();
+        fs::write(source_dir.join("wintun.dll"), dll_bytes).unwrap();
+        let manifest = manual_bundle_manifest(exe_bytes, dll_bytes);
+        let sources = manual_bundle_sources();
+        let store = CoreStore::new(&root);
+
+        let result = store
+            .install_manual_bundle(&manifest, &source_dir, &sources)
+            .unwrap();
+
+        assert!(result.executable_path.exists());
+        assert_eq!(result.manifest.files.len(), 2);
+        assert_eq!(
+            store.active_version(&CoreId::from("trusttunnel")).unwrap(),
+            Some("1.0.49".to_string())
+        );
+        store
+            .verify_core(&CoreId::from("trusttunnel"), "1.0.49", &sources)
+            .unwrap();
+
+        fs::write(&result.executable_path, b"tampered").unwrap();
+        let error = store
+            .verify_core(&CoreId::from("trusttunnel"), "1.0.49", &sources)
+            .unwrap_err();
+        assert!(matches!(error, CoreStoreError::Security(_)));
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(source_dir).unwrap();
+    }
+
+    #[test]
+    fn store_rejects_manual_bundle_with_wrong_pinned_hash() {
+        let root = temp_root();
+        let source_dir = temp_root();
+        fs::create_dir_all(&source_dir).unwrap();
+        let exe_bytes = b"trusttunnel-binary".as_slice();
+        let dll_bytes = b"wintun-binary".as_slice();
+        // Disk copy of the executable does not match the pinned hash.
+        fs::write(source_dir.join("trusttunnel_client.exe"), b"swapped").unwrap();
+        fs::write(source_dir.join("wintun.dll"), dll_bytes).unwrap();
+        let manifest = manual_bundle_manifest(exe_bytes, dll_bytes);
+
+        let error = CoreStore::new(&root)
+            .install_manual_bundle(&manifest, &source_dir, &manual_bundle_sources())
+            .unwrap_err();
+
+        assert!(matches!(error, CoreStoreError::Security(_)));
+        if root.exists() {
+            fs::remove_dir_all(root).unwrap();
+        }
+        fs::remove_dir_all(source_dir).unwrap();
+    }
+
+    fn manual_bundle_manifest(exe_bytes: &[u8], dll_bytes: &[u8]) -> InstalledCoreManifest {
+        InstalledCoreManifest {
+            core_id: CoreId::from("trusttunnel"),
+            display_name: "TrustTunnel".to_string(),
+            version: "1.0.49".to_string(),
+            source_type: SourceType::ManualBundle,
+            owner: None,
+            repo: None,
+            asset_name: "manual".to_string(),
+            executable_path: "trusttunnel_client.exe".to_string(),
+            sha256: "manual".to_string(),
+            signature_status: SignatureStatus::Unknown,
+            installed_at_unix_ms: 1,
+            files: vec![
+                InstalledCoreFile {
+                    path: "trusttunnel_client.exe".to_string(),
+                    sha256: sha256_hex(exe_bytes),
+                },
+                InstalledCoreFile {
+                    path: "wintun.dll".to_string(),
+                    sha256: sha256_hex(dll_bytes),
+                },
+            ],
+        }
+    }
+
+    fn manual_bundle_sources() -> Vec<TrustedCoreSource> {
+        vec![TrustedCoreSource {
+            core_id: CoreId::from("trusttunnel"),
+            display_name: "TrustTunnel".to_string(),
+            source_type: SourceType::ManualBundle,
+            status: SourceStatus::Active,
+            homepage: None,
+            license: Some("upstream license".to_string()),
+            owner: None,
+            repo: None,
+            install_enabled: false,
+            checksum_required: false,
+            signature_preferred: false,
+            allowed_asset_patterns: Vec::new(),
+            pinned_release: None,
+            notes: None,
+        }]
+    }
+
     fn trusted_sources() -> Vec<TrustedCoreSource> {
         trusted_sources_for(&InstalledCoreManifest {
             core_id: CoreId::from("sing-box"),
@@ -1169,6 +1530,31 @@ mod tests {
             }),
             notes: None,
         }]
+    }
+
+    fn install_test_version(store: &CoreStore, version: &str, installed_at_unix_ms: u64) {
+        let artifact_bytes = format!("trusted-core-binary-{version}").into_bytes();
+        let manifest = InstalledCoreManifest {
+            core_id: CoreId::from("sing-box"),
+            display_name: "sing-box".to_string(),
+            version: version.to_string(),
+            source_type: SourceType::GithubRelease,
+            owner: Some("SagerNet".to_string()),
+            repo: Some("sing-box".to_string()),
+            asset_name: format!("sing-box-{version}-windows-amd64.zip"),
+            executable_path: "sing-box.exe".to_string(),
+            sha256: sha256_hex(&artifact_bytes),
+            signature_status: SignatureStatus::Unknown,
+            installed_at_unix_ms,
+            files: Vec::new(),
+        };
+        let request = CoreInstallRequest {
+            manifest,
+            artifact: CoreArtifact::single_file(artifact_bytes, "sing-box.exe"),
+        };
+        store
+            .install(&request, &trusted_sources_for(&request.manifest))
+            .unwrap();
     }
 
     fn temp_root() -> PathBuf {

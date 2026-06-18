@@ -4,20 +4,23 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose, Engine as _};
 use poh_core::{
-    sha256_hex, CoreAdapter, CoreId, EndpointConfig, ImportInput, ListenerConfig, ListenerMode,
-    LogLevel, Profile, ProfileId, Redactor, RoutingMode, RoutingProfile, SocksConfig,
-    TrustTunnelAdapter, TrustTunnelConfig, TrustTunnelCoreProfile, TunConfig, UpstreamProtocol,
-    ValidationWarning,
+    sha256_hex, CoreAdapter, CoreId, EndpointConfig, ImportInput, InstalledCoreFile,
+    InstalledCoreManifest, ListenerConfig, ListenerMode, LogLevel, Profile, ProfileId, Redactor,
+    RoutingMode, RoutingProfile, SignatureStatus, SocksConfig, SourceType, TrustTunnelAdapter,
+    TrustTunnelConfig, TrustTunnelCoreProfile, TrustedCoreSource, TrustedSourcePolicy, TunConfig,
+    UpstreamProtocol, ValidationWarning,
 };
 use poh_core_runner::{MapSecretResolver, MaterializedRuntime, RuntimeMaterializer};
 use poh_core_session::{
     wait_for_process_startup, CoreLaunchDescriptor, SessionFileLock, SessionLifecycleState,
     SessionStartupProbe, SessionTimings,
 };
+use poh_core_store::CoreStore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -103,6 +106,12 @@ pub struct PersistedDesktopSession {
     pub last_error: Option<String>,
     #[serde(default)]
     pub updated_at_unix_ms: u64,
+    /// OS process creation time (Windows FILETIME, 100ns ticks). Combined with
+    /// `pid` it forms a reuse-proof identity: a recycled PID has a different
+    /// creation time, so it can never be mistaken for our core. `0` means the
+    /// session predates identity tracking (legacy fallback to image-name match).
+    #[serde(default)]
+    pub creation_time_100ns: u64,
 }
 
 const MAX_IMPORT_BYTES: usize = 2 * 1024 * 1024;
@@ -165,7 +174,8 @@ pub fn start_desktop_session(
             profile.core_id.to_string(),
         ))
     })?;
-    let executable_path = find_trusttunnel_client()?;
+    let resolved_core = resolve_core(&profile.core_id)?;
+    let executable_path = resolved_core.executable_path.clone();
     let started_at_unix_ms = now_unix_ms();
     let runtime_dir = runtime_root()?.join(format!(
         "{}-{}",
@@ -192,11 +202,12 @@ pub fn start_desktop_session(
     let stdout = File::create(&log_path)?;
     restrict_runtime_permissions(&log_path)?;
     let stderr = stdout.try_clone()?;
-    let install_dir = executable_path
-        .parent()
-        .ok_or_else(|| DesktopStateError::InvalidCorePath(executable_path.clone()))?;
-    let launch_spec =
-        launch_descriptor.build_spec(&executable_path, install_dir, &runtime_dir, &materialized)?;
+    let launch_spec = launch_descriptor.build_spec(
+        &executable_path,
+        &resolved_core.install_dir,
+        &runtime_dir,
+        &materialized,
+    )?;
     let command_args = launch_spec.args.clone();
     let mut command = Command::new(&launch_spec.executable_path);
     command
@@ -205,6 +216,7 @@ pub fn start_desktop_session(
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+    configure_core_command(&mut command);
 
     for (key, value) in &launch_spec.environment {
         command.env(key, value);
@@ -213,6 +225,9 @@ pub fn start_desktop_session(
     let mut child = command.spawn()?;
 
     let pid = child.id();
+    // Snapshot the OS creation time immediately so later stop/status calls can
+    // prove this PID is still our core and not a recycled one.
+    let creation_time_100ns = process_creation_time(pid).unwrap_or(0);
     let mut session = PersistedDesktopSession {
         profile_id: profile.id.to_string(),
         profile_name: profile.name,
@@ -227,6 +242,7 @@ pub fn start_desktop_session(
         lifecycle_state: SessionLifecycleState::Starting,
         last_error: None,
         updated_at_unix_ms: started_at_unix_ms,
+        creation_time_100ns,
     };
     if let Err(error) = save_session(&session) {
         let _ = child.kill();
@@ -252,9 +268,7 @@ pub fn start_desktop_session(
         };
     }
 
-    session.lifecycle_state = SessionLifecycleState::Running;
-    session.updated_at_unix_ms = now_unix_ms();
-    save_session(&session)?;
+    enforce_transition(&mut session, SessionLifecycleState::Running)?;
     runtime_guard.keep();
 
     Ok(DesktopSessionStart {
@@ -283,12 +297,27 @@ pub fn stop_desktop_session() -> Result<DesktopSessionStatus, DesktopStateError>
     };
 
     let mut stopping_session = session.clone();
-    stopping_session.lifecycle_state = SessionLifecycleState::Stopping;
-    stopping_session.updated_at_unix_ms = now_unix_ms();
-    let _ = save_session(&stopping_session);
+    if enforce_transition(&mut stopping_session, SessionLifecycleState::Stopping).is_err() {
+        // Disconnect must always be able to clean up; record Stopping directly if
+        // the recorded state was unexpected rather than refusing to stop.
+        stopping_session.lifecycle_state = SessionLifecycleState::Stopping;
+        stopping_session.updated_at_unix_ms = now_unix_ms();
+        let _ = save_session(&stopping_session);
+    }
 
     if is_session_process_running(&session)? {
-        stop_process(session.pid)?;
+        terminate_session_process(&session)?;
+    }
+
+    // Only declare the session gone once the process is confirmed dead. A
+    // surviving core would otherwise be orphaned with no record to stop it.
+    if is_session_process_running(&session)? {
+        let mut faulted = session.clone();
+        faulted.lifecycle_state = SessionLifecycleState::Faulted;
+        faulted.last_error = Some("core process did not exit after stop".to_string());
+        faulted.updated_at_unix_ms = now_unix_ms();
+        let _ = save_session(&faulted);
+        return Err(DesktopStateError::CoreStopFailed(session.pid));
     }
 
     clear_persisted_session(Some(session.clone()))?;
@@ -681,6 +710,12 @@ pub enum DesktopStateError {
     StateTooLarge(String),
     #[error("POH_TRUSTTUNNEL_CORE_PATH is allowed only for dev runs")]
     CoreOverrideDisabled,
+    #[error("core is not installed in the managed store: {0}")]
+    CoreNotInstalled(String),
+    #[error("core process {0} did not exit after stop")]
+    CoreStopFailed(u32),
+    #[error("illegal session transition from {0:?} to {1:?}")]
+    IllegalTransition(SessionLifecycleState, SessionLifecycleState),
     #[error("bundled core integrity mismatch for {path}: expected {expected}, got {actual}")]
     CoreIntegrityMismatch {
         path: String,
@@ -696,12 +731,52 @@ pub enum DesktopStateError {
     #[error(transparent)]
     Session(#[from] poh_core_session::SessionError),
     #[error(transparent)]
+    CoreStore(#[from] poh_core_store::CoreStoreError),
+    #[error(transparent)]
+    Security(#[from] poh_core::SecurityError),
+    #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
-fn find_trusttunnel_client() -> Result<PathBuf, DesktopStateError> {
+/// Resolved location of a verified core executable inside the managed store.
+struct ResolvedCore {
+    executable_path: PathBuf,
+    install_dir: PathBuf,
+}
+
+const BUNDLED_TRUSTTUNNEL_VERSION: &str = "1.0.49";
+
+/// Resolve the executable for a profile's core from the managed core store.
+///
+/// Every core now launches from `cores/<core_id>/<version>/`. TrustTunnel keeps
+/// a migration path: if it has not been provisioned into the store yet, the
+/// app-local bundle is verified by pinned hashes and copied into the store on
+/// first use. Other cores (downloadable modules) must already be installed.
+fn resolve_core(core_id: &CoreId) -> Result<ResolvedCore, DesktopStateError> {
+    if core_id.as_str() == "trusttunnel" {
+        return resolve_trusttunnel_core();
+    }
+
+    resolve_store_core(core_id)
+}
+
+fn resolve_store_core(core_id: &CoreId) -> Result<ResolvedCore, DesktopStateError> {
+    let store = CoreStore::new(core_store_root());
+    let sources = embedded_trusted_sources()?;
+    let version = store
+        .active_version(core_id)?
+        .ok_or_else(|| DesktopStateError::CoreNotInstalled(core_id.to_string()))?;
+    let verified = store.verify_core(core_id, &version, &sources)?;
+    Ok(ResolvedCore {
+        executable_path: verified.executable_path,
+        install_dir: verified.install_dir,
+    })
+}
+
+fn resolve_trusttunnel_core() -> Result<ResolvedCore, DesktopStateError> {
+    // Dev-only override stays a direct, hash-checked path and never touches the store.
     if let Ok(path) = env::var("POH_TRUSTTUNNEL_CORE_PATH") {
         if !dev_core_override_enabled() {
             return Err(DesktopStateError::CoreOverrideDisabled);
@@ -709,24 +784,95 @@ fn find_trusttunnel_client() -> Result<PathBuf, DesktopStateError> {
 
         let candidate = PathBuf::from(path);
         if candidate.exists() {
-            return verify_trusttunnel_bundle(candidate);
+            let executable_path = verify_trusttunnel_bundle(candidate)?;
+            let install_dir = executable_path
+                .parent()
+                .ok_or_else(|| DesktopStateError::InvalidCorePath(executable_path.clone()))?
+                .to_path_buf();
+            return Ok(ResolvedCore {
+                executable_path,
+                install_dir,
+            });
         }
     }
 
-    let current_exe = env::current_exe()?;
-    let Some(app_dir) = current_exe.parent() else {
-        return Err(DesktopStateError::CoreExecutableNotFound);
-    };
-    let candidate = app_dir
-        .join("native")
-        .join("bundled")
-        .join("win-x64")
-        .join("trusttunnel_client.exe");
-    if candidate.exists() {
-        return verify_trusttunnel_bundle(candidate);
+    let store = CoreStore::new(core_store_root());
+    let core_id = CoreId::from("trusttunnel");
+    let sources = embedded_trusted_sources()?;
+
+    // Fast path: already provisioned into the store and still intact.
+    if let Some(version) = store.active_version(&core_id)? {
+        if let Ok(verified) = store.verify_core(&core_id, &version, &sources) {
+            return Ok(ResolvedCore {
+                executable_path: verified.executable_path,
+                install_dir: verified.install_dir,
+            });
+        }
     }
 
-    Err(DesktopStateError::CoreExecutableNotFound)
+    // Migration path: provision the app-local bundle into the managed store.
+    let bundle_dir = app_local_bundle_dir()?;
+    let manifest = bundled_trusttunnel_manifest();
+    store.install_manual_bundle(&manifest, &bundle_dir, &sources)?;
+    let verified = store.verify_core(&core_id, &manifest.version, &sources)?;
+    Ok(ResolvedCore {
+        executable_path: verified.executable_path,
+        install_dir: verified.install_dir,
+    })
+}
+
+fn app_local_bundle_dir() -> Result<PathBuf, DesktopStateError> {
+    let current_exe = env::current_exe()?;
+    let app_dir = current_exe
+        .parent()
+        .ok_or(DesktopStateError::CoreExecutableNotFound)?;
+    let bundle_dir = app_dir.join("native").join("bundled").join("win-x64");
+    if !bundle_dir.join("trusttunnel_client.exe").exists() {
+        return Err(DesktopStateError::CoreExecutableNotFound);
+    }
+
+    Ok(bundle_dir)
+}
+
+fn bundled_trusttunnel_manifest() -> InstalledCoreManifest {
+    let mut files = vec![InstalledCoreFile {
+        path: "trusttunnel_client.exe".to_string(),
+        sha256: BUNDLED_TRUSTTUNNEL_SHA256.to_string(),
+    }];
+    if cfg!(windows) {
+        files.push(InstalledCoreFile {
+            path: "wintun.dll".to_string(),
+            sha256: BUNDLED_WINTUN_SHA256.to_string(),
+        });
+    }
+
+    InstalledCoreManifest {
+        core_id: CoreId::from("trusttunnel"),
+        display_name: "TrustTunnel".to_string(),
+        version: BUNDLED_TRUSTTUNNEL_VERSION.to_string(),
+        source_type: SourceType::ManualBundle,
+        owner: None,
+        repo: None,
+        asset_name: "manual".to_string(),
+        executable_path: "trusttunnel_client.exe".to_string(),
+        sha256: "manual".to_string(),
+        signature_status: SignatureStatus::Unknown,
+        installed_at_unix_ms: now_unix_ms(),
+        files,
+    }
+}
+
+fn embedded_trusted_sources() -> Result<Vec<TrustedCoreSource>, DesktopStateError> {
+    let json = include_str!("../../../core-registry/trusted-sources.json");
+    Ok(TrustedSourcePolicy::default().parse_sources(json)?)
+}
+
+fn core_store_root() -> PathBuf {
+    env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir)
+        .join("ProxyOpenHub")
+        .join("cores")
 }
 
 fn verify_trusttunnel_bundle(candidate: PathBuf) -> Result<PathBuf, DesktopStateError> {
@@ -806,7 +952,19 @@ fn load_session() -> Result<Option<PersistedDesktopSession>, DesktopStateError> 
     }
 
     let content = fs::read_to_string(path)?;
-    Ok(Some(serde_json::from_str(&content)?))
+    Ok(parse_persisted_session(&content))
+}
+
+fn parse_persisted_session(content: &str) -> Option<PersistedDesktopSession> {
+    match serde_json::from_str(content) {
+        Ok(session) => Some(session),
+        Err(error) => {
+            // A corrupt session record must not wedge connect/disconnect forever.
+            // Treat it as "no session"; the next save_session overwrites it.
+            eprintln!("Ignoring corrupt session.json: {error}");
+            None
+        }
+    }
 }
 
 fn save_session(session: &PersistedDesktopSession) -> Result<(), DesktopStateError> {
@@ -834,7 +992,10 @@ fn clear_persisted_session(
     if let Some(session) = session {
         let runtime_dir = PathBuf::from(&session.runtime_dir);
         if runtime_dir.exists() {
-            let _ = fs::remove_dir_all(runtime_dir);
+            // Retry: this directory holds the materialized config with the
+            // plaintext secret, so removal must not be silently skipped if the
+            // just-stopped core briefly still holds a handle.
+            remove_dir_all_with_retries(&runtime_dir);
         }
     }
 
@@ -874,8 +1035,20 @@ fn is_session_process_running(
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("trusttunnel_client.exe");
+        let image_matches =
+            snapshot.pid == session.pid && snapshot.image_name.eq_ignore_ascii_case(expected_image);
+        if !image_matches {
+            return Ok(false);
+        }
 
-        Ok(snapshot.pid == session.pid && snapshot.image_name.eq_ignore_ascii_case(expected_image))
+        // Strong identity: if a creation time was recorded, the live PID must
+        // still carry it, otherwise this is a recycled PID belonging to another
+        // process and must not be treated as (or killed as) our core.
+        if session.creation_time_100ns != 0 {
+            return Ok(process_creation_time(session.pid) == Some(session.creation_time_100ns));
+        }
+
+        Ok(true)
     }
 
     #[cfg(not(windows))]
@@ -967,9 +1140,150 @@ fn stop_process(pid: u32) -> Result<(), DesktopStateError> {
     #[cfg(not(windows))]
     {
         let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
+            .args(["-KILL", &pid.to_string()])
             .status()?;
         Ok(())
+    }
+}
+
+/// Best-effort graceful stop request before a forced kill. On Windows this is a
+/// `CTRL_BREAK` to the core's process group (the core is spawned with
+/// `CREATE_NEW_PROCESS_GROUP`); on other platforms it is `SIGTERM`. It is only a
+/// hint - the caller always confirms exit and force-kills on timeout, so this
+/// failing (e.g. no console attached) is harmless.
+fn request_graceful_stop(pid: u32) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
+        unsafe {
+            let _ = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid);
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+    }
+}
+
+const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(3);
+const FORCE_STOP_TIMEOUT: Duration = Duration::from_secs(3);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Stop the session's core: ask it to exit gracefully, then force-kill if it
+/// does not, always confirming the process is actually gone (by verified
+/// identity) before returning success.
+fn terminate_session_process(session: &PersistedDesktopSession) -> Result<(), DesktopStateError> {
+    request_graceful_stop(session.pid);
+    if wait_for_session_exit(session, GRACEFUL_STOP_TIMEOUT)? {
+        return Ok(());
+    }
+
+    stop_process(session.pid)?;
+    let _ = wait_for_session_exit(session, FORCE_STOP_TIMEOUT)?;
+    Ok(())
+}
+
+fn wait_for_session_exit(
+    session: &PersistedDesktopSession,
+    timeout: Duration,
+) -> Result<bool, DesktopStateError> {
+    let started = Instant::now();
+    loop {
+        if !is_session_process_running(session)? {
+            return Ok(true);
+        }
+
+        if started.elapsed() >= timeout {
+            return Ok(false);
+        }
+
+        thread::sleep(PROCESS_POLL_INTERVAL);
+    }
+}
+
+/// OS process creation time as a FILETIME (100ns ticks). Returns `None` if the
+/// process is gone or cannot be queried, which the callers treat as "not ours".
+#[cfg(windows)]
+fn process_creation_time(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    if pid == 0 {
+        return None;
+    }
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+
+        let mut creation = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exit = creation;
+        let mut kernel = creation;
+        let mut user = creation;
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+
+        Some(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
+    }
+}
+
+#[cfg(not(windows))]
+fn process_creation_time(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// Spawn the core in its own process group so it can be asked to exit gracefully
+/// with `CTRL_BREAK` and so a console signal to our process does not reach it.
+#[cfg(windows)]
+fn configure_core_command(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(not(windows))]
+fn configure_core_command(_command: &mut Command) {}
+
+fn enforce_transition(
+    session: &mut PersistedDesktopSession,
+    next: SessionLifecycleState,
+) -> Result<(), DesktopStateError> {
+    if !session.lifecycle_state.can_transition_to(next) {
+        return Err(DesktopStateError::IllegalTransition(
+            session.lifecycle_state,
+            next,
+        ));
+    }
+
+    session.lifecycle_state = next;
+    session.updated_at_unix_ms = now_unix_ms();
+    save_session(session)
+}
+
+fn remove_dir_all_with_retries(dir: &Path) {
+    for attempt in 0..5 {
+        if !dir.exists() {
+            return;
+        }
+        if fs::remove_dir_all(dir).is_ok() {
+            return;
+        }
+        // The core may still hold the runtime config open for a moment after
+        // exit; back off briefly and retry so the plaintext config is removed.
+        thread::sleep(PROCESS_POLL_INTERVAL * (attempt + 1));
     }
 }
 
@@ -1037,10 +1351,10 @@ fn protect_secret(value: &str) -> Result<String, DesktopStateError> {
     #[cfg(windows)]
     {
         let encrypted = dpapi_protect(value.as_bytes())?;
-        return Ok(format!(
+        Ok(format!(
             "{DPAPI_SECRET_PREFIX}{}",
             general_purpose::STANDARD.encode(encrypted)
-        ));
+        ))
     }
 
     #[cfg(not(windows))]
@@ -1062,8 +1376,8 @@ fn unprotect_secret(value: &str) -> Result<String, DesktopStateError> {
             .decode(encoded)
             .map_err(|error| DesktopStateError::SecretProtection(error.to_string()))?;
         let plain = dpapi_unprotect(&encrypted)?;
-        return String::from_utf8(plain)
-            .map_err(|error| DesktopStateError::SecretProtection(error.to_string()));
+        String::from_utf8(plain)
+            .map_err(|error| DesktopStateError::SecretProtection(error.to_string()))
     }
 
     #[cfg(not(windows))]
@@ -1560,6 +1874,82 @@ fn listener_mode_to_desktop(value: ListenerMode) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_session(pid: u32, creation_time_100ns: u64) -> PersistedDesktopSession {
+        PersistedDesktopSession {
+            profile_id: "profile-1".to_string(),
+            profile_name: "Example".to_string(),
+            core_id: "trusttunnel".to_string(),
+            pid,
+            executable_path: "trusttunnel_client.exe".to_string(),
+            config_path: "config.toml".to_string(),
+            log_path: "trusttunnel.log".to_string(),
+            runtime_dir: "runtime".to_string(),
+            state_path: "state.json".to_string(),
+            started_at_unix_ms: 1,
+            lifecycle_state: SessionLifecycleState::Running,
+            last_error: None,
+            updated_at_unix_ms: 1,
+            creation_time_100ns,
+        }
+    }
+
+    #[test]
+    fn corrupt_session_record_is_treated_as_no_session() {
+        assert!(parse_persisted_session("this is not json").is_none());
+        assert!(parse_persisted_session("{ \"pid\":").is_none());
+    }
+
+    #[test]
+    fn legacy_session_without_creation_time_defaults_to_zero() {
+        let json = r#"{
+            "profile_id": "p",
+            "profile_name": "n",
+            "core_id": "trusttunnel",
+            "pid": 1234,
+            "executable_path": "trusttunnel_client.exe",
+            "config_path": "config.toml",
+            "log_path": "trusttunnel.log",
+            "runtime_dir": "runtime",
+            "started_at_unix_ms": 1
+        }"#;
+
+        let session = parse_persisted_session(json).expect("legacy session should parse");
+        assert_eq!(session.creation_time_100ns, 0);
+        assert_eq!(session.pid, 1234);
+    }
+
+    #[test]
+    fn session_record_round_trips_creation_time() {
+        let session = sample_session(4321, 0x0123_4567_89ab_cdef);
+        let encoded = serde_json::to_string(&session).unwrap();
+        let decoded = parse_persisted_session(&encoded).unwrap();
+        assert_eq!(decoded.creation_time_100ns, 0x0123_4567_89ab_cdef);
+        assert_eq!(decoded, session);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_creation_time_is_stable_for_live_pid_and_absent_for_dead_pid() {
+        let pid = std::process::id();
+        let first = process_creation_time(pid).expect("our own process has a creation time");
+        let second = process_creation_time(pid).expect("creation time is stable");
+        assert_eq!(first, second);
+        assert!(first != 0);
+
+        // PID 0 is the System Idle pseudo-process; we reject it explicitly.
+        assert_eq!(process_creation_time(0), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn is_session_process_running_rejects_creation_time_mismatch() {
+        // Our own PID is alive, but the recorded creation time is wrong, so the
+        // session must be considered not-ours (the PID-reuse guard).
+        let mut session = sample_session(std::process::id(), 1);
+        session.executable_path = std::env::current_exe().unwrap().display().to_string();
+        assert!(!is_session_process_running(&session).unwrap());
+    }
 
     #[test]
     fn builds_session_plan_from_desktop_state_profile() {

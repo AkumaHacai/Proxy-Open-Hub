@@ -38,6 +38,13 @@ Date: 2026-06-18
   - Windows reserved device path rejection;
   - installed file hash collection;
   - tamper verification for installed files.
+- Added core-store GC for old versions:
+  - normal installs now keep the active version plus the newest inactive version
+    as rollback;
+  - only valid installed-version directories with `core-manifest.json` are
+    deleted, leaving staging/unknown debris for diagnosis;
+  - regression test covers `1.0.0 -> 1.1.0 -> 1.2.0` retention and explicit
+    inactive-retention `0`.
 - Added pinned GitHub downloader:
   - no "latest release" lookup;
   - no planned/unpinned source download;
@@ -65,8 +72,78 @@ Date: 2026-06-18
   - TrustTunnel desktop launch now gets command args and log file policy from the descriptor.
 - Rewrote `InfoProject.md` and `todone_arh.md` into clean ASCII documentation.
 
+## Modularity Phase B - TrustTunnel As Managed Module (architecture pass)
+
+- Added `CoreStore::install_manual_bundle()` so a locally bundled, multi-file
+  core is installed into the managed store layout `cores/<core_id>/<version>/`,
+  copying each file only after its bytes match a pinned per-file SHA-256.
+- Extracted shared install plumbing (`plan_paths`, `reset_staging`,
+  `promote_staged`) so manual-bundle and download installs share the same
+  staging/rollback/active-version promotion path.
+- Replaced the app-local `find_trusttunnel_client()` lookup with store-based
+  `resolve_core()` in the desktop session flow:
+  - TrustTunnel self-provisions from the app-local bundle into the store on
+    first run, then launches from the store (migration path preserved);
+  - re-provisions automatically if the stored copy is missing or tampered;
+  - other cores resolve from the store's active installed version (forward path
+    for downloadable modules like NaiveProxy);
+  - `POH_TRUSTTUNNEL_CORE_PATH` remains a dev-only, hash-checked direct path.
+- Pinned `trusttunnel_client.exe` / `wintun.dll` SHA-256 checks are preserved and
+  now expressed once as the store manifest's per-file hash list.
+- Launch working directory/log path continue to come from the launch descriptor,
+  so `wintun.dll` loads from the same store version directory.
+- Tests added for manual-bundle install (happy path + wrong-hash rejection +
+  post-install tamper detection).
+
+## Process Lifecycle P1 - Identity + safe stop (architecture pass)
+
+See `LLM_Cloud/process-lifecycle.md` (section 13, P1) for the full design.
+
+- Added reuse-proof process identity: `PersistedDesktopSession.creation_time_100ns`,
+  captured right after spawn via `OpenProcess`/`GetProcessTimes`. `is_session_process_running`
+  now matches PID + image name + creation time (legacy sessions fall back to image name),
+  so a recycled PID can no longer be mistaken for - or killed as - our core (closes F-3).
+- Safe stop: best-effort graceful (`CREATE_NEW_PROCESS_GROUP` at spawn + `CTRL_BREAK`),
+  then force `taskkill /F`, then confirm the process is actually gone by identity. If it
+  survives, the session is marked `Faulted` and `CoreStopFailed` is returned instead of
+  falsely reporting "stopped".
+- `runtime_dir` (which holds the materialized plaintext `config.toml`) is removed only
+  after confirmed exit, with retries (closes part of F-2).
+- `enforce_transition` + `IllegalTransition` error; used in start (->Running) and stop
+  (->Stopping). State machine extended so stop is reachable from Preparing/Starting/Faulted.
+- `load_session` is resilient to a corrupt `session.json` (treated as no session).
+- Tests: +5 in poh_cli (identity / creation-time / corrupt-session parse), +1 in
+  poh_core_session (stop reachable from any active state).
+- Remaining (handed off): graceful CTRL_BREAK is best-effort (often no console -> force
+  kill), so the network safety-net + orphan reconciliation (P2) and the Tier-2 supervisor
+  with a Job Object (P3) are still required. See process-lifecycle.md.
+
+## UI Pass 1 - Settings layout fix, routing skeleton, motion tokens
+
+Full plan/notes in `LLM_Cloud/ui-layout-and-animation.md` (section 8).
+
+- Fixed the critical compact-mode bug where Settings text wrapped one letter per
+  line: `SettingsShell` no longer hard-codes 760x600 (sizes to available room,
+  collapses the nav to an icon rail below 620px); `_Field` is responsive
+  (label stacks above the control when narrow); `_Segmented`/`_AccentSwatches`
+  use `Wrap` so they never overflow.
+- Added a `Routing` settings tab skeleton (mode / rules / DNS / kill switch /
+  core-specific), values local-only for now (banner says so).
+- Added `PohMotion` motion tokens and unified the compact<->expanded curves:
+  layout `AnimatedPositioned` and the window resize now share
+  `Curves.fastOutSlowIn`, reducing the "jumping" during the morph.
+- Verified: `dart format`, `flutter analyze` (No issues), `flutter test` (3/3,
+  incl. new compact-width no-overflow + Routing-tab regression tests).
+- Remaining (UI pass 2): compact bottom-sheet + blur overlay host, native window
+  min size, `_AppearIn` entrance, wiring Routing to desktop-state.
+
 ## Verified
 
+- `cargo fmt --all` / `cargo fmt --all --check` (clean)
+- `cargo test --workspace` (56 tests pass)
+- `cargo build --workspace`
+- `cargo clippy --workspace` (clean)
+- Earlier security/Phase A pass also verified:
 - `cargo fmt --all`
 - `cargo test --workspace`
 - Previous pass also verified:
@@ -77,10 +154,12 @@ Date: 2026-06-18
 
 ## Remaining
 
-- Add core store GC for old versions and rollback retention.
 - Add long-lived watchdog/service behavior with automatic crash rollback.
 - Add system proxy rollback hooks when proxy automation is enabled.
-- Move bundled TrustTunnel lookup into managed core store / descriptor-backed module resolution.
-- Move bundled TrustTunnel into managed core store layout.
-- Add NaiveProxy as the first downloadable optional module after a pinned release is selected.
+- Add NaiveProxy as the first downloadable optional module after a pinned release is selected
+  (adapter + pinned catalog entry; store/downloader/descriptor/launch plumbing is ready).
 - Add signature/AuthentiCode or publisher validation before enabling automatic install/update UI.
+
+Done since last list: bundled TrustTunnel is now resolved from and provisioned
+into the managed core store (Phase B). See the Phase B section above and
+`todone_arh.md`.

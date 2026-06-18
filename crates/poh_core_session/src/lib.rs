@@ -32,14 +32,17 @@ impl SessionLifecycleState {
             (Self::Idle, Self::Preparing)
                 | (Self::Idle, Self::Starting)
                 | (Self::Preparing, Self::Starting)
+                | (Self::Preparing, Self::Stopping)
                 | (Self::Preparing, Self::Faulted)
                 | (Self::Starting, Self::Running)
+                | (Self::Starting, Self::Stopping)
                 | (Self::Starting, Self::Faulted)
                 | (Self::Running, Self::Stopping)
                 | (Self::Running, Self::Faulted)
                 | (Self::Stopping, Self::Idle)
                 | (Self::Stopping, Self::Faulted)
                 | (Self::Faulted, Self::Preparing)
+                | (Self::Faulted, Self::Stopping)
                 | (Self::Faulted, Self::Idle)
         )
     }
@@ -558,6 +561,16 @@ mod tests {
         assert!(SessionLifecycleState::Running.can_transition_to(SessionLifecycleState::Stopping));
         assert!(!SessionLifecycleState::Running.can_transition_to(SessionLifecycleState::Starting));
         assert!(!SessionLifecycleState::Idle.can_transition_to(SessionLifecycleState::Running));
+    }
+
+    #[test]
+    fn stop_is_reachable_from_every_active_state() {
+        // Disconnect must always be able to begin tearing down, even from a
+        // half-started or already-faulted session.
+        assert!(SessionLifecycleState::Starting.can_transition_to(SessionLifecycleState::Stopping));
+        assert!(SessionLifecycleState::Preparing.can_transition_to(SessionLifecycleState::Stopping));
+        assert!(SessionLifecycleState::Faulted.can_transition_to(SessionLifecycleState::Stopping));
+        assert!(!SessionLifecycleState::Idle.can_transition_to(SessionLifecycleState::Stopping));
     }
 
     #[test]
