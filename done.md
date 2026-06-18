@@ -131,8 +131,20 @@ See `LLM_Cloud/process-lifecycle.md` (section 13, P1) for the full design.
   - old `Idle` live sessions are migrated to `Running`;
   - live `Running`/`Starting`/`Faulted` sessions are preserved/adopted instead
     of launching a second inbound.
-- Remaining P2: system proxy ownership/revert and broader network safety-net
-  for TUN/DNS/kill-switch repair after force-kill or crash.
+- Added Windows system proxy ownership/revert for desktop sessions:
+  - profiles can opt in with `Listener.SystemProxy.Enabled`;
+  - mode `0` auto-picks HTTP when an HTTP local proxy is configured, otherwise
+    SOCKS; mode `1` forces HTTP; mode `2` forces SOCKS;
+  - `crates/poh_cli/src/network_effects.rs` snapshots `ProxyEnable`,
+    `ProxyServer`, and `ProxyOverride` before applying our proxy;
+  - `PersistedDesktopSession.network_effects` stores the rollback lease in
+    `session.json`;
+  - stop/reset/reconcile restore the previous Windows proxy settings before
+    removing session state/runtime files;
+  - startup applies system proxy only after the core readiness probe succeeds,
+    and rolls back if applying/saving fails.
+- Remaining P2: broader network safety-net for TUN/DNS/kill-switch repair after
+  force-kill or crash.
 
 ## Modularity Phase C - NaiveProxy adapter slice
 
@@ -157,8 +169,8 @@ See `LLM_Cloud/process-lifecycle.md` (section 13, P1) for the full design.
     map;
   - materialization selects the adapter by `core_id` from `CoreRegistry`;
   - NaiveProxy startup readiness probes the local listener host/port.
-- Remaining Phase C: choose/pin a real NaiveProxy release, enable the catalog
-  install path, and add system-proxy ownership/rollback.
+- Remaining Phase C: choose/pin a real NaiveProxy release and enable the catalog
+  install path/UI flow.
 
 ## UI Pass 1 - Settings layout fix, routing skeleton, motion tokens
 
@@ -197,7 +209,7 @@ Full plan/notes in `LLM_Cloud/ui-layout-and-animation.md` (section 8).
 ## Remaining
 
 - Add long-lived watchdog/service behavior with automatic crash rollback.
-- Add system proxy rollback hooks when proxy automation is enabled.
+- Add TUN/DNS/kill-switch repair hooks for TrustTunnel crash/force-kill cases.
 - Finish NaiveProxy as the first downloadable optional module after a pinned release is selected
   (adapter + desktop profile bridge are ready; pinned catalog entry + install enablement remain).
 - Add signature/AuthentiCode or publisher validation before enabling automatic install/update UI.

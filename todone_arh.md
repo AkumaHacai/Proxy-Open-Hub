@@ -78,7 +78,7 @@ the managed core store.
 - [x] Wire NaiveProxy desktop profile import/storage through the generic DPAPI state path.
 - [ ] Wire install flow through catalog/store/downloader.
 - [x] Add LocalProxy readiness probe for NaiveProxy.
-- [ ] Add system proxy ownership/rollback.
+- [x] Add system proxy ownership/rollback.
 
 ## Already Connected To Earlier Work
 
@@ -118,9 +118,13 @@ Recommended order:
     values in the same desktop state.
   - LocalProxy readiness: DONE for NaiveProxy. Startup probes the imported
     `listen` host/port instead of sleeping.
-  - remaining new code: system-proxy ownership/rollback and the real pinned
-    catalog entry. Do NOT store the proxy password in the profile; URL-encode it
-    in the secret value (see the security note in the integration doc).
+  - system-proxy ownership/rollback: DONE for the desktop session path. Profiles
+    can opt in through `Listener.SystemProxy`; `session.json` records
+    `network_effects`, Windows proxy state is snapshotted before apply, and
+    stop/reset/reconcile restore it before removing the session.
+  - remaining new code: the real pinned catalog entry + install UI flow. Do NOT
+    store the proxy password in the profile; URL-encode it in the secret value
+    (see the security note in the integration doc).
 
 2. **Process lifecycle hardening (connect/disconnect/safe process control)** -
    full plan in `LLM_Cloud/process-lifecycle.md`. This is the riskiest area:
@@ -130,12 +134,11 @@ Recommended order:
      closes F-3), graceful->force stop with confirmed exit + `CoreStopFailed`,
      runtime_dir cleanup with retries, `enforce_transition`/`IllegalTransition`,
      corrupt-`session.json` resilience. See process-lifecycle.md section 13 + done.md.
-   - **P2 IN PROGRESS:** `desktop-session-reset` plus start/stop reconciliation
-     are implemented. Remaining P2 work is the network safety-net: system-proxy
-     ownership + unconditional revert, `network_effects` tracking, and TUN/DNS/
-     kill-switch repair after force-kill or crash. This is the real fix for
-     "internet stays broken after a force-kill / crash" - graceful CTRL_BREAK in
-     P1 is only best-effort.
+   - **P2 IN PROGRESS:** `desktop-session-reset`, start/stop reconciliation, and
+     system-proxy ownership/rollback are implemented. Remaining P2 work is the
+     broader network safety-net: TUN/DNS/kill-switch repair after force-kill or
+     crash. This is the real fix for "internet stays broken after a force-kill /
+     crash" - graceful CTRL_BREAK in P1 is only best-effort.
    - **P3 (= A4):** long-lived supervisor with a Windows Job Object
      (`KILL_ON_JOB_CLOSE`) that guarantees no orphaned cores + real-time crash
      detection. Supersedes/expands the A4 item below.

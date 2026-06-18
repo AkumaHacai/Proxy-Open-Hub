@@ -25,6 +25,11 @@ use poh_core_store::CoreStore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::network_effects::{
+    apply_system_proxy_lease, prepare_system_proxy, restore_network_effects, NetworkEffectError,
+    NetworkEffectsState, SystemProxyConfig,
+};
+
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::LocalFree;
 #[cfg(windows)]
@@ -113,6 +118,8 @@ pub struct PersistedDesktopSession {
     /// session predates identity tracking (legacy fallback to image-name match).
     #[serde(default)]
     pub creation_time_100ns: u64,
+    #[serde(default, skip_serializing_if = "NetworkEffectsState::is_empty")]
+    pub network_effects: NetworkEffectsState,
 }
 
 const MAX_IMPORT_BYTES: usize = 2 * 1024 * 1024;
@@ -169,6 +176,7 @@ pub fn start_desktop_session(
         .into_iter()
         .find(|profile| profile.id == profile_id)
         .ok_or_else(|| DesktopStateError::ProfileNotFound(profile_id.to_string()))?;
+    let system_proxy_config = system_proxy_config_for_profile(&desktop_profile)?;
     let startup_probe = startup_probe_for_profile(&desktop_profile);
     let (profile, materialized, redacted_preview) =
         build_materialized_session(desktop_profile, &secrets)?;
@@ -242,6 +250,7 @@ pub fn start_desktop_session(
         last_error: None,
         updated_at_unix_ms: started_at_unix_ms,
         creation_time_100ns,
+        network_effects: NetworkEffectsState::default(),
     };
     if let Err(error) = save_session(&session) {
         let _ = child.kill();
@@ -267,7 +276,41 @@ pub fn start_desktop_session(
         };
     }
 
-    enforce_transition(&mut session, SessionLifecycleState::Running)?;
+    if let Some(system_proxy_config) = system_proxy_config {
+        match prepare_system_proxy(&system_proxy_config, now_unix_ms()) {
+            Ok(lease) => {
+                session.network_effects.system_proxy = Some(lease);
+                session.updated_at_unix_ms = now_unix_ms();
+                if let Err(error) = save_session(&session) {
+                    let _ = terminate_session_process(&session);
+                    let _ = clear_persisted_session(Some(session.clone()));
+                    return Err(error);
+                }
+                if let Err(error) = session
+                    .network_effects
+                    .system_proxy
+                    .as_ref()
+                    .map(apply_system_proxy_lease)
+                    .transpose()
+                {
+                    let _ = terminate_session_process(&session);
+                    let _ = clear_persisted_session(Some(session.clone()));
+                    return Err(error.into());
+                }
+            }
+            Err(error) => {
+                let _ = terminate_session_process(&session);
+                let _ = clear_persisted_session(Some(session.clone()));
+                return Err(error.into());
+            }
+        }
+    }
+
+    if let Err(error) = enforce_transition(&mut session, SessionLifecycleState::Running) {
+        let _ = terminate_session_process(&session);
+        let _ = clear_persisted_session(Some(session.clone()));
+        return Err(error);
+    }
     runtime_guard.keep();
 
     Ok(DesktopSessionStart {
@@ -425,7 +468,7 @@ fn desktop_session_status_unlocked() -> Result<DesktopSessionStatus, DesktopStat
             faulted.lifecycle_state = SessionLifecycleState::Faulted;
             faulted.last_error = Some("session process is not running".to_string());
             faulted.updated_at_unix_ms = now_unix_ms();
-            let _ = save_session(&faulted);
+            clear_persisted_session(Some(session))?;
             return Ok(DesktopSessionStatus {
                 running,
                 session: Some(faulted),
@@ -669,6 +712,7 @@ fn desktop_profile_from_trusttunnel_import(
                     http_proxy_address: socks.http_proxy_address,
                     http_proxy_allow_lan_access: socks.http_proxy_allow_lan_access,
                 },
+                system_proxy: DesktopSystemProxy::default(),
             },
         },
         secrets,
@@ -853,12 +897,16 @@ pub enum DesktopStateError {
     CoreStopFailed(u32),
     #[error("illegal session transition from {0:?} to {1:?}")]
     IllegalTransition(SessionLifecycleState, SessionLifecycleState),
+    #[error(transparent)]
+    NetworkEffect(#[from] NetworkEffectError),
     #[error("bundled core integrity mismatch for {path}: expected {expected}, got {actual}")]
     CoreIntegrityMismatch {
         path: String,
         expected: String,
         actual: String,
     },
+    #[error("invalid system proxy configuration: {0}")]
+    InvalidSystemProxyConfig(String),
     #[error("bundled core sidecar is missing: {0}")]
     CoreSidecarMissing(String),
     #[error(transparent)]
@@ -1121,6 +1169,10 @@ fn save_session(session: &PersistedDesktopSession) -> Result<(), DesktopStateErr
 fn clear_persisted_session(
     session: Option<PersistedDesktopSession>,
 ) -> Result<(), DesktopStateError> {
+    if let Some(session) = &session {
+        restore_network_effects(&session.network_effects)?;
+    }
+
     let session_path = session_file()?;
     if session_path.exists() {
         let _ = fs::remove_file(session_path);
@@ -1186,6 +1238,123 @@ fn startup_timings_for_probe(probe: &SessionStartupProbe) -> SessionTimings {
         },
         SessionStartupProbe::TcpSocket { .. } => SessionTimings::default(),
     }
+}
+
+const DEFAULT_PROXY_OVERRIDE: &str = "<local>";
+
+fn system_proxy_config_for_profile(
+    profile: &DesktopProfile,
+) -> Result<Option<SystemProxyConfig>, DesktopStateError> {
+    if !profile.listener.system_proxy.enabled {
+        return Ok(None);
+    }
+
+    let proxy_server = match profile.core_id.as_str() {
+        "" | "trusttunnel" => trusttunnel_system_proxy_server(profile)?,
+        "naiveproxy" => naiveproxy_system_proxy_server(profile)?,
+        core_id => {
+            return Err(DesktopStateError::InvalidSystemProxyConfig(format!(
+                "core {core_id} does not expose a known local proxy listener"
+            )));
+        }
+    };
+    let proxy_override = if profile
+        .listener
+        .system_proxy
+        .proxy_override
+        .trim()
+        .is_empty()
+    {
+        DEFAULT_PROXY_OVERRIDE.to_string()
+    } else {
+        profile
+            .listener
+            .system_proxy
+            .proxy_override
+            .trim()
+            .to_string()
+    };
+
+    Ok(Some(SystemProxyConfig::new(proxy_server, proxy_override)))
+}
+
+fn trusttunnel_system_proxy_server(profile: &DesktopProfile) -> Result<String, DesktopStateError> {
+    match profile.listener.system_proxy.mode {
+        1 => http_proxy_server(&profile.listener.socks.http_proxy_address),
+        2 => socks_proxy_server(&profile.listener.socks.address),
+        _ if !profile.listener.socks.http_proxy_address.trim().is_empty() => {
+            http_proxy_server(&profile.listener.socks.http_proxy_address)
+        }
+        _ if profile.listener.mode == 1 => socks_proxy_server(&profile.listener.socks.address),
+        _ => Err(DesktopStateError::InvalidSystemProxyConfig(
+            "TrustTunnel system proxy needs SOCKS mode or an HTTP proxy address".to_string(),
+        )),
+    }
+}
+
+fn naiveproxy_system_proxy_server(profile: &DesktopProfile) -> Result<String, DesktopStateError> {
+    let core_config = profile.core_config.clone().ok_or_else(|| {
+        DesktopStateError::InvalidSystemProxyConfig(
+            "NaiveProxy profile does not contain core config".to_string(),
+        )
+    })?;
+    let core_profile = serde_json::from_value::<NaiveProxyCoreProfile>(core_config)?;
+    let listen = core_profile.config.listen;
+    let port = listen.port.ok_or_else(|| {
+        DesktopStateError::InvalidSystemProxyConfig(
+            "NaiveProxy listener must include a port for system proxy".to_string(),
+        )
+    })?;
+    let address = format_socket_address(listen.host.trim(), port);
+    match profile.listener.system_proxy.mode {
+        1 if listen.scheme.eq_ignore_ascii_case("http") => http_proxy_server(&address),
+        2 if listen.scheme.eq_ignore_ascii_case("socks")
+            || listen.scheme.eq_ignore_ascii_case("socks5") =>
+        {
+            socks_proxy_server(&address)
+        }
+        1 => Err(DesktopStateError::InvalidSystemProxyConfig(
+            "NaiveProxy listener is not an HTTP proxy".to_string(),
+        )),
+        2 => Err(DesktopStateError::InvalidSystemProxyConfig(
+            "NaiveProxy listener is not a SOCKS proxy".to_string(),
+        )),
+        _ if listen.scheme.eq_ignore_ascii_case("http") => http_proxy_server(&address),
+        _ if listen.scheme.eq_ignore_ascii_case("socks")
+            || listen.scheme.eq_ignore_ascii_case("socks5") =>
+        {
+            socks_proxy_server(&address)
+        }
+        _ => Err(DesktopStateError::InvalidSystemProxyConfig(format!(
+            "unsupported NaiveProxy listener scheme: {}",
+            listen.scheme
+        ))),
+    }
+}
+
+fn http_proxy_server(address: &str) -> Result<String, DesktopStateError> {
+    let address = normalize_proxy_address(address)?;
+    Ok(format!("http={address};https={address}"))
+}
+
+fn socks_proxy_server(address: &str) -> Result<String, DesktopStateError> {
+    let address = normalize_proxy_address(address)?;
+    Ok(format!("socks={address}"))
+}
+
+fn normalize_proxy_address(address: &str) -> Result<String, DesktopStateError> {
+    let address = address.trim();
+    if address.is_empty()
+        || address.contains(';')
+        || address.chars().any(char::is_whitespace)
+        || !address.contains(':')
+    {
+        return Err(DesktopStateError::InvalidSystemProxyConfig(format!(
+            "invalid local proxy address: {address}"
+        )));
+    }
+
+    Ok(address.to_string())
 }
 
 fn is_session_process_running(
@@ -1962,6 +2131,12 @@ struct DesktopListener {
     tun: DesktopTun,
     #[serde(rename = "Socks", default)]
     socks: DesktopSocks,
+    #[serde(
+        rename = "SystemProxy",
+        default,
+        skip_serializing_if = "DesktopSystemProxy::is_default"
+    )]
+    system_proxy: DesktopSystemProxy,
 }
 
 impl DesktopListener {
@@ -1974,6 +2149,24 @@ impl DesktopListener {
             tun: self.tun.into_tun_config(),
             socks: self.socks.into_socks_config(),
         }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct DesktopSystemProxy {
+    #[serde(rename = "Enabled", default)]
+    enabled: bool,
+    /// 0 = auto, 1 = HTTP, 2 = SOCKS. Stored as an integer for compatibility
+    /// with the current desktop-state shape used by the Flutter UI.
+    #[serde(rename = "Mode", default)]
+    mode: i32,
+    #[serde(rename = "ProxyOverride", default)]
+    proxy_override: String,
+}
+
+impl DesktopSystemProxy {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
     }
 }
 
@@ -2093,6 +2286,7 @@ mod tests {
             last_error: None,
             updated_at_unix_ms: 1,
             creation_time_100ns,
+            network_effects: NetworkEffectsState::default(),
         }
     }
 
@@ -2118,6 +2312,7 @@ mod tests {
 
         let session = parse_persisted_session(json).expect("legacy session should parse");
         assert_eq!(session.creation_time_100ns, 0);
+        assert!(session.network_effects.is_empty());
         assert_eq!(session.pid, 1234);
     }
 
@@ -2344,6 +2539,60 @@ mod tests {
             startup_probe_for_profile(&profile),
             SessionStartupProbe::tcp("127.0.0.1:1080")
         );
+    }
+
+    #[test]
+    fn trusttunnel_system_proxy_prefers_http_proxy_in_auto_mode() {
+        let profile = DesktopProfile {
+            id: "p".to_string(),
+            listener: DesktopListener {
+                mode: 1,
+                socks: DesktopSocks {
+                    address: "127.0.0.1:1080".to_string(),
+                    http_proxy_address: "127.0.0.1:8080".to_string(),
+                    ..DesktopSocks::default()
+                },
+                system_proxy: DesktopSystemProxy {
+                    enabled: true,
+                    mode: 0,
+                    proxy_override: String::new(),
+                },
+                ..DesktopListener::default()
+            },
+            ..DesktopProfile::default()
+        };
+
+        let config = system_proxy_config_for_profile(&profile)
+            .unwrap()
+            .expect("system proxy should be enabled");
+
+        assert_eq!(
+            config.proxy_server,
+            "http=127.0.0.1:8080;https=127.0.0.1:8080"
+        );
+        assert_eq!(config.proxy_override, "<local>");
+    }
+
+    #[test]
+    fn naiveproxy_system_proxy_uses_listener_scheme() {
+        let adapter = NaiveProxyAdapter::new();
+        let parsed = adapter
+            .parse_profile(&ImportInput::text("https://user:pass@example.com:8443"))
+            .unwrap();
+        let (mut profile, _secrets) =
+            desktop_profile_from_import("naive-1".to_string(), parsed).unwrap();
+        profile.listener.system_proxy = DesktopSystemProxy {
+            enabled: true,
+            mode: 0,
+            proxy_override: "localhost;127.*".to_string(),
+        };
+
+        let config = system_proxy_config_for_profile(&profile)
+            .unwrap()
+            .expect("system proxy should be enabled");
+
+        assert_eq!(config.proxy_server, "socks=127.0.0.1:1080");
+        assert_eq!(config.proxy_override, "localhost;127.*");
     }
 
     #[test]

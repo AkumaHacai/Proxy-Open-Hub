@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod desktop_state;
+mod network_effects;
 
 use poh_core::{
     sha256_hex, CoreAdapter, CoreId, CoreRegistry, ImportInput, InstalledCoreManifest,
