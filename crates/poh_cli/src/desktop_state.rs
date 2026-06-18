@@ -150,14 +150,9 @@ pub fn start_desktop_session(
     profile_id: &str,
 ) -> Result<DesktopSessionStart, DesktopStateError> {
     let _lock = SessionFileLock::acquire(session_lock_file()?)?;
-    let status = desktop_session_status_unlocked()?;
-    if status.running {
-        if let Some(session) = status.session {
-            return Err(DesktopStateError::SessionAlreadyRunning(session.pid));
-        }
+    if let Some(session) = reconcile_desktop_session_unlocked()? {
+        return Err(DesktopStateError::SessionAlreadyRunning(session.pid));
     }
-    clear_persisted_session(status.session)?;
-    cleanup_orphaned_runtime_dirs()?;
 
     let state = load_desktop_state(state_path)?;
     let secrets = state.resolved_secrets()?;
@@ -289,7 +284,7 @@ pub fn start_desktop_session(
 
 pub fn stop_desktop_session() -> Result<DesktopSessionStatus, DesktopStateError> {
     let _lock = SessionFileLock::acquire(session_lock_file()?)?;
-    let Some(session) = load_session()? else {
+    let Some(session) = reconcile_desktop_session_unlocked()? else {
         return Ok(DesktopSessionStatus {
             running: false,
             session: None,
@@ -328,8 +323,72 @@ pub fn stop_desktop_session() -> Result<DesktopSessionStatus, DesktopStateError>
     })
 }
 
+pub fn reset_desktop_session() -> Result<DesktopSessionStatus, DesktopStateError> {
+    let _lock = SessionFileLock::acquire(session_lock_file()?)?;
+    if let Some(session) = load_session()? {
+        if is_session_process_running(&session)? {
+            terminate_session_process(&session)?;
+            if is_session_process_running(&session)? {
+                let mut faulted = session.clone();
+                faulted.lifecycle_state = SessionLifecycleState::Faulted;
+                faulted.last_error = Some("core process did not exit during reset".to_string());
+                faulted.updated_at_unix_ms = now_unix_ms();
+                let _ = save_session(&faulted);
+                return Err(DesktopStateError::CoreStopFailed(session.pid));
+            }
+        }
+        clear_persisted_session(Some(session))?;
+    }
+    cleanup_orphaned_runtime_dirs()?;
+
+    Ok(DesktopSessionStatus {
+        running: false,
+        session: None,
+    })
+}
+
 pub fn desktop_session_status() -> Result<DesktopSessionStatus, DesktopStateError> {
     desktop_session_status_unlocked()
+}
+
+fn reconcile_desktop_session_unlocked() -> Result<Option<PersistedDesktopSession>, DesktopStateError>
+{
+    let Some(session) = load_session()? else {
+        cleanup_orphaned_runtime_dirs()?;
+        return Ok(None);
+    };
+
+    let running = is_session_process_running(&session)?;
+    if running {
+        if session.lifecycle_state == SessionLifecycleState::Stopping {
+            terminate_session_process(&session)?;
+            if is_session_process_running(&session)? {
+                let mut faulted = session.clone();
+                faulted.lifecycle_state = SessionLifecycleState::Faulted;
+                faulted.last_error = Some("core process did not exit during reconcile".to_string());
+                faulted.updated_at_unix_ms = now_unix_ms();
+                let _ = save_session(&faulted);
+                return Err(DesktopStateError::CoreStopFailed(session.pid));
+            }
+            clear_persisted_session(Some(session))?;
+            cleanup_orphaned_runtime_dirs()?;
+            return Ok(None);
+        }
+
+        if session.lifecycle_state == SessionLifecycleState::Idle {
+            let mut migrated = session.clone();
+            migrated.lifecycle_state = SessionLifecycleState::Running;
+            migrated.updated_at_unix_ms = now_unix_ms();
+            let _ = save_session(&migrated);
+            return Ok(Some(migrated));
+        }
+
+        return Ok(Some(session));
+    }
+
+    clear_persisted_session(Some(session))?;
+    cleanup_orphaned_runtime_dirs()?;
+    Ok(None)
 }
 
 fn desktop_session_status_unlocked() -> Result<DesktopSessionStatus, DesktopStateError> {

@@ -118,6 +118,22 @@ See `LLM_Cloud/process-lifecycle.md` (section 13, P1) for the full design.
   kill), so the network safety-net + orphan reconciliation (P2) and the Tier-2 supervisor
   with a Job Object (P3) are still required. See process-lifecycle.md.
 
+## Process Lifecycle P2 - Reset/reconcile slice
+
+- Added CLI command `desktop-session-reset` for a user/support "repair state"
+  action: it acquires the session lock, stops the verified session process if it
+  is alive, confirms exit by process identity, removes `session.json`, and
+  cleans orphaned runtime directories.
+- Added reconciliation before `desktop-session-start` and `desktop-session-stop`:
+  - dead sessions are cleared before a new start;
+  - a crashed-in-the-middle `Stopping` session is reaped before reporting stop
+    complete;
+  - old `Idle` live sessions are migrated to `Running`;
+  - live `Running`/`Starting`/`Faulted` sessions are preserved/adopted instead
+    of launching a second inbound.
+- Remaining P2: system proxy ownership/revert and broader network safety-net
+  for TUN/DNS/kill-switch repair after force-kill or crash.
+
 ## UI Pass 1 - Settings layout fix, routing skeleton, motion tokens
 
 Full plan/notes in `LLM_Cloud/ui-layout-and-animation.md` (section 8).

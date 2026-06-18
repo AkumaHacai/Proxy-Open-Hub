@@ -77,12 +77,13 @@ fn main() -> ExitCode {
         Some("desktop-session-plan") => desktop_session_plan(&args[1..]),
         Some("desktop-session-start") => desktop_session_start(&args[1..]),
         Some("desktop-session-stop") => desktop_session_stop(),
+        Some("desktop-session-reset") => desktop_session_reset(),
         Some("desktop-session-status") => desktop_session_status(),
         Some("desktop-session-log") => desktop_session_log(),
         Some(command) => {
             eprintln!("Unknown command: {command}");
             eprintln!(
-                "Usage: poh_cli [list|sources|core-list-installed|core-download-plan <core-id>|core-install <core-id> [executable-relative-path]|runtime-smoke|store-smoke|session-smoke|desktop-preview-profile <input-text-file|->|desktop-import-profile <input-text-file|->|desktop-session-plan <state-path> <profile-id>|desktop-session-start <state-path> <profile-id>|desktop-session-stop|desktop-session-status|desktop-session-log|detect <profile text>]"
+                "Usage: poh_cli [list|sources|core-list-installed|core-download-plan <core-id>|core-install <core-id> [executable-relative-path]|runtime-smoke|store-smoke|session-smoke|desktop-preview-profile <input-text-file|->|desktop-import-profile <input-text-file|->|desktop-session-plan <state-path> <profile-id>|desktop-session-start <state-path> <profile-id>|desktop-session-stop|desktop-session-reset|desktop-session-status|desktop-session-log|detect <profile text>]"
             );
             ExitCode::from(2)
         }
@@ -549,6 +550,22 @@ fn desktop_session_stop() -> ExitCode {
         }
         Err(error) => {
             eprintln!("Desktop session stop failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn desktop_session_reset() -> ExitCode {
+    match desktop_state::reset_desktop_session() {
+        Ok(status) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&status).expect("status should serialize")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Desktop session reset failed: {error}");
             ExitCode::from(1)
         }
     }

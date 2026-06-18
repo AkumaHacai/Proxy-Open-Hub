@@ -122,11 +122,12 @@ Recommended order:
      closes F-3), graceful->force stop with confirmed exit + `CoreStopFailed`,
      runtime_dir cleanup with retries, `enforce_transition`/`IllegalTransition`,
      corrupt-`session.json` resilience. See process-lifecycle.md section 13 + done.md.
-   - **P2 NEXT:** orphan reconciliation/reaping on app start + a `desktop-session-reset`
-     force-reset, and the network safety-net (system-proxy ownership + unconditional
-     revert; `network_effects` tracking; TUN/DNS/kill-switch repair). This is the
-     real fix for "internet stays broken after a force-kill / crash" - graceful
-     CTRL_BREAK in P1 is only best-effort.
+   - **P2 IN PROGRESS:** `desktop-session-reset` plus start/stop reconciliation
+     are implemented. Remaining P2 work is the network safety-net: system-proxy
+     ownership + unconditional revert, `network_effects` tracking, and TUN/DNS/
+     kill-switch repair after force-kill or crash. This is the real fix for
+     "internet stays broken after a force-kill / crash" - graceful CTRL_BREAK in
+     P1 is only best-effort.
    - **P3 (= A4):** long-lived supervisor with a Windows Job Object
      (`KILL_ON_JOB_CLOSE`) that guarantees no orphaned cores + real-time crash
      detection. Supersedes/expands the A4 item below.
