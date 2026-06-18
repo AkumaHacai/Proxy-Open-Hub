@@ -420,6 +420,7 @@ pub struct Redactor;
 impl Redactor {
     pub fn redact(input: &str) -> String {
         let mut output = redact_tt_links(input);
+        output = redact_url_userinfo(&output);
         for key in [
             "password",
             "passwd",
@@ -617,6 +618,60 @@ fn redact_tt_links(input: &str) -> String {
     output
 }
 
+fn redact_url_userinfo(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    for token in split_preserving_whitespace(input) {
+        output.push_str(&redact_url_userinfo_token(token));
+    }
+
+    output
+}
+
+fn split_preserving_whitespace(input: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut start = 0;
+    let mut in_whitespace = input.chars().next().is_some_and(char::is_whitespace);
+
+    for (index, ch) in input.char_indices() {
+        let ch_is_whitespace = ch.is_whitespace();
+        if ch_is_whitespace != in_whitespace {
+            tokens.push(&input[start..index]);
+            start = index;
+            in_whitespace = ch_is_whitespace;
+        }
+    }
+
+    if start < input.len() {
+        tokens.push(&input[start..]);
+    }
+
+    tokens
+}
+
+fn redact_url_userinfo_token(token: &str) -> String {
+    let Some(scheme_end) = token.find("://") else {
+        return token.to_string();
+    };
+    let authority_start = scheme_end + 3;
+    let Some(at_relative) = token[authority_start..].find('@') else {
+        return token.to_string();
+    };
+    let at_index = authority_start + at_relative;
+    let authority_end = token[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|offset| authority_start + offset)
+        .unwrap_or(token.len());
+    if at_index > authority_end {
+        return token.to_string();
+    }
+
+    let mut redacted = String::with_capacity(token.len());
+    redacted.push_str(&token[..authority_start]);
+    redacted.push_str("<redacted>@");
+    redacted.push_str(&token[at_index + 1..]);
+    redacted
+}
+
 fn redact_assignment(input: &str, key: &str) -> String {
     let mut output = String::with_capacity(input.len());
     for line in input.lines() {
@@ -751,6 +806,15 @@ mod tests {
         assert!(!redacted.contains("tt://?abc"));
         assert!(redacted.contains("tt://<redacted>"));
         assert!(redacted.contains("\"client_random\": <redacted>"));
+    }
+
+    #[test]
+    fn redactor_hides_url_userinfo() {
+        let input = "proxy=https://user:p%40ss%3Aword@example.com:443/path";
+        let redacted = Redactor::redact(input);
+
+        assert!(!redacted.contains("user:p%40ss%3Aword"));
+        assert_eq!(redacted, "proxy=https://<redacted>@example.com:443/path");
     }
 
     #[test]

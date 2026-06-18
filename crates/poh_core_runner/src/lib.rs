@@ -191,7 +191,11 @@ where
 fn is_secret_key(key: &str) -> bool {
     matches!(
         key,
-        "endpoint.password" | "endpoint.client_random" | "listener.socks.password"
+        "endpoint.password"
+            | "endpoint.client_random"
+            | "listener.socks.password"
+            | "proxy.password"
+            | "listen.password"
     )
 }
 
@@ -225,6 +229,30 @@ mod tests {
 
         assert!(materialized.files[0].content.contains("real-secret"));
         assert!(!materialized.redacted_preview().contains("real-secret"));
+    }
+
+    #[test]
+    fn materializer_substitutes_naiveproxy_url_password_placeholder() {
+        let config = RuntimeConfig {
+            files: vec![RuntimeFile {
+                relative_path: "config.json".to_string(),
+                content: r#"{"proxy":"https://user:<proxy.password>@example.com"}"#.to_string(),
+                sensitive: true,
+            }],
+            command_args: vec!["config.json".to_string()],
+            environment: BTreeMap::new(),
+        };
+        let resolver = MapSecretResolver::new(BTreeMap::from([(
+            "proxy.password".to_string(),
+            "p%40ss%3Aword".to_string(),
+        )]));
+
+        let materialized = RuntimeMaterializer::default()
+            .materialize(&config, &resolver)
+            .unwrap();
+
+        assert!(materialized.files[0].content.contains("p%40ss%3Aword"));
+        assert!(!materialized.redacted_preview().contains("p%40ss%3Aword"));
     }
 
     #[test]

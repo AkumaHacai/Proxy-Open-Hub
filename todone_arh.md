@@ -72,9 +72,10 @@ the managed core store.
 ## Phase C - NaiveProxy As First Downloadable Module
 
 - [ ] Pin release metadata: version, asset name, SHA-256.
-- [ ] Add `NaiveProxyAdapter` to `poh_core`.
-- [ ] Import `config.json` and proxy URLs without storing plaintext passwords in profiles.
-- [ ] Materialize `config.json` through secret placeholders + DPAPI secret store.
+- [x] Add `NaiveProxyAdapter` to `poh_core`.
+- [x] Import `config.json` and proxy URLs without storing plaintext passwords in profiles.
+- [x] Materialize `config.json` through secret placeholders + runner secret allowlist.
+- [ ] Wire NaiveProxy desktop profile import/storage through the generic DPAPI state path.
 - [ ] Wire install flow through catalog/store/downloader.
 - [ ] Add LocalProxy readiness probe and system proxy rollback.
 
@@ -107,12 +108,15 @@ Recommended order:
    - launch: a `naiveproxy` descriptor already exists
      (`CoreLaunchDescriptor::for_core`, LocalProxy/`naive.exe`); `resolve_store_core`
      will resolve it with no session-layer changes.
-   - remaining new code: `NaiveProxyAdapter` in `poh_core` (parse `config.json`
-     and proxy URLs, materialize `config.json` via secret placeholders +
-     `proxy.password` secret key in `poh_core_runner::is_secret_key`), a
-     LocalProxy readiness probe wiring, and the desktop profile shape for a core
-     without TUN. Do NOT store the proxy password in the profile; URL-encode it
-     in the secret value (see the security note in the integration doc).
+  - adapter: DONE. `NaiveProxyAdapter` parses `config.json` and proxy URLs,
+    extracts `proxy.password` / `listen.password` into secret candidates, keeps
+    plaintext passwords out of `core_config`, and materializes `config.json`
+    through placeholders accepted by `poh_core_runner`.
+  - remaining new code: generic desktop profile storage/import for non-TUN
+    cores, LocalProxy readiness probe wiring, system-proxy ownership/rollback,
+    and the real pinned catalog entry. Do NOT store the proxy password in the
+    profile; URL-encode it in the secret value (see the security note in the
+    integration doc).
 
 2. **Process lifecycle hardening (connect/disconnect/safe process control)** -
    full plan in `LLM_Cloud/process-lifecycle.md`. This is the riskiest area:

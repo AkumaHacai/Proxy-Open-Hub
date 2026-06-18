@@ -1,5 +1,7 @@
 pub mod adapter;
 pub mod model;
+pub mod naiveproxy;
+pub mod naiveproxy_config;
 pub mod registry;
 pub mod security;
 pub mod trusttunnel;
@@ -13,6 +15,10 @@ pub use adapter::{
 };
 pub use model::{
     ConnectionState, CoreCapabilities, CoreId, CoreManifest, Profile, ProfileId, ProtocolColor,
+};
+pub use naiveproxy::NaiveProxyAdapter;
+pub use naiveproxy_config::{
+    NaiveProxyConfig, NaiveProxyCoreProfile, NaiveProxyEndpoint, NaiveProxySecretCandidate,
 };
 pub use registry::{CoreDetection, CoreRegistry};
 pub use security::{

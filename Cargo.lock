@@ -363,10 +363,12 @@ name = "poh_core"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "percent-encoding",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
+ "url",
 ]
 
 [[package]]

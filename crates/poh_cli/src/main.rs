@@ -9,8 +9,8 @@ mod desktop_state;
 
 use poh_core::{
     sha256_hex, CoreAdapter, CoreId, CoreRegistry, ImportInput, InstalledCoreManifest,
-    PinnedRelease, SignatureStatus, SourceStatus, SourceType, TrustTunnelAdapter,
-    TrustedCoreSource, TrustedSourcePolicy,
+    NaiveProxyAdapter, PinnedRelease, SignatureStatus, SourceStatus, SourceType,
+    TrustTunnelAdapter, TrustedCoreSource, TrustedSourcePolicy,
 };
 use poh_core_runner::{MapSecretResolver, RuntimeMaterializer};
 use poh_core_session::{CoreLaunchDescriptor, CoreLaunchSpec, CoreProcess};
@@ -21,6 +21,7 @@ const MAX_DESKTOP_IMPORT_BYTES: u64 = 2 * 1024 * 1024;
 fn main() -> ExitCode {
     let mut registry = CoreRegistry::new();
     registry.register(TrustTunnelAdapter::new());
+    registry.register(NaiveProxyAdapter::new());
 
     let args = env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {

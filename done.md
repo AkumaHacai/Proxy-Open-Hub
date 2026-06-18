@@ -134,6 +134,26 @@ See `LLM_Cloud/process-lifecycle.md` (section 13, P1) for the full design.
 - Remaining P2: system proxy ownership/revert and broader network safety-net
   for TUN/DNS/kill-switch repair after force-kill or crash.
 
+## Modularity Phase C - NaiveProxy adapter slice
+
+- Added `NaiveProxyAdapter` to `poh_core` and registered it in the CLI registry.
+- Added NaiveProxy config models for `listen`, `proxy`, and safe advanced flags.
+- Import supports:
+  - `config.json` with `listen` + `proxy`;
+  - bare proxy URLs such as `https://user:pass@host` / `quic://...`.
+- Proxy and listener passwords are extracted into secret candidates
+  (`proxy.password`, `listen.password`) and are not stored in `Profile.core_config`.
+- `config.json` runtime output uses secret placeholders, and
+  `poh_core_runner` now allows/substitutes NaiveProxy secret keys.
+- Added userinfo URL redaction so logs/previews hide
+  `scheme://user:password@host` values.
+- Tests added for detection, import, plaintext avoidance, placeholder runtime
+  generation, runner substitution, registry detection, and URL userinfo
+  redaction.
+- Remaining Phase C: choose/pin a real NaiveProxy release, enable the catalog
+  install path, add generic desktop profile storage/import for non-TUN cores,
+  wire LocalProxy readiness, and add system-proxy ownership/rollback.
+
 ## UI Pass 1 - Settings layout fix, routing skeleton, motion tokens
 
 Full plan/notes in `LLM_Cloud/ui-layout-and-animation.md` (section 8).
@@ -156,7 +176,7 @@ Full plan/notes in `LLM_Cloud/ui-layout-and-animation.md` (section 8).
 ## Verified
 
 - `cargo fmt --all` / `cargo fmt --all --check` (clean)
-- `cargo test --workspace` (56 tests pass)
+- `cargo test --workspace` (63 tests pass)
 - `cargo build --workspace`
 - `cargo clippy --workspace` (clean)
 - Earlier security/Phase A pass also verified:
@@ -172,8 +192,8 @@ Full plan/notes in `LLM_Cloud/ui-layout-and-animation.md` (section 8).
 
 - Add long-lived watchdog/service behavior with automatic crash rollback.
 - Add system proxy rollback hooks when proxy automation is enabled.
-- Add NaiveProxy as the first downloadable optional module after a pinned release is selected
-  (adapter + pinned catalog entry; store/downloader/descriptor/launch plumbing is ready).
+- Finish NaiveProxy as the first downloadable optional module after a pinned release is selected
+  (adapter is ready; pinned catalog entry + generic desktop profile/import + LocalProxy readiness remain).
 - Add signature/AuthentiCode or publisher validation before enabling automatic install/update UI.
 
 Done since last list: bundled TrustTunnel is now resolved from and provisioned
