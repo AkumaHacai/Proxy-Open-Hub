@@ -746,7 +746,21 @@ mod tests {
         assert!(sources
             .iter()
             .any(|source| source.core_id.as_str() == "trusttunnel"));
-        assert!(sources.iter().all(|source| !source.is_installable()));
+
+        // trusttunnel is a manual bundle, never installable via download
+        let trusttunnel = sources
+            .iter()
+            .find(|s| s.core_id.as_str() == "trusttunnel")
+            .unwrap();
+        assert!(!trusttunnel.is_installable());
+
+        // naiveproxy has a pinned release and is the first downloadable core
+        let naive = sources
+            .iter()
+            .find(|s| s.core_id.as_str() == "naiveproxy")
+            .unwrap();
+        assert!(naive.is_installable());
+        assert!(naive.pinned_release.is_some());
     }
 
     #[test]

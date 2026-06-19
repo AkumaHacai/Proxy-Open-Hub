@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zip::ZipArchive;
 
+mod signature;
+pub use signature::authenticode_status;
+
 pub const DEFAULT_MAX_CORE_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 pub const DEFAULT_INACTIVE_VERSION_RETENTION: usize = 1;
 
@@ -273,6 +276,7 @@ struct ActiveCoreVersion {
 pub struct CoreStore {
     root_dir: PathBuf,
     policy: InstalledCorePolicy,
+    require_signature: bool,
 }
 
 impl CoreStore {
@@ -280,7 +284,17 @@ impl CoreStore {
         Self {
             root_dir: root_dir.into(),
             policy: InstalledCorePolicy::default(),
+            require_signature: false,
         }
+    }
+
+    /// Require a trusted Authenticode signature on the core executable in
+    /// [`CoreStore::verify_core`]. Off by default because the current bundled
+    /// cores are unsigned; turn this on before exposing the automatic
+    /// install/update UI for downloadable cores.
+    pub fn with_signature_required(mut self, required: bool) -> Self {
+        self.require_signature = required;
+        self
     }
 
     pub fn plan_install(
@@ -352,13 +366,13 @@ impl CoreStore {
                 extract_zip_archive(&plan.staging_dir, &request.artifact)?
             }
         }
-        let staged_executable = plan.staging_dir.join(&request.manifest.executable_path);
-        if !staged_executable.exists() {
-            return Err(CoreStoreError::CoreMissing(staged_executable));
-        }
-
         let mut installed_manifest = request.manifest.clone();
         installed_manifest.files = collect_installed_files(&plan.staging_dir)?;
+        installed_manifest.executable_path = resolve_staged_executable_path(
+            &plan.staging_dir,
+            &request.manifest.executable_path,
+            &installed_manifest.files,
+        )?;
         self.promote_staged(&plan, installed_manifest)
     }
 
@@ -437,8 +451,14 @@ impl CoreStore {
     fn promote_staged(
         &self,
         plan: &CoreInstallPlan,
-        installed_manifest: InstalledCoreManifest,
+        mut installed_manifest: InstalledCoreManifest,
     ) -> Result<CoreInstallResult, CoreStoreError> {
+        // Record the real Authenticode status of the staged executable so the UI
+        // and policy can reason about it later. This does not block the install
+        // on its own; enforcement is opt-in via `verify_core` + `require_signature`.
+        let staged_executable = plan.staging_dir.join(&installed_manifest.executable_path);
+        installed_manifest.signature_status = signature::authenticode_status(&staged_executable);
+
         fs::write(
             plan.staging_dir.join("core-manifest.json"),
             serde_json::to_vec_pretty(&installed_manifest)?,
@@ -467,10 +487,12 @@ impl CoreStore {
         self.set_active_version(&plan.core_id, &plan.version)?;
         self.garbage_collect_old_versions(&plan.core_id, DEFAULT_INACTIVE_VERSION_RETENTION)?;
 
+        let executable_path = plan.install_dir.join(&installed_manifest.executable_path);
+
         Ok(CoreInstallResult {
             manifest: installed_manifest,
             install_dir: plan.install_dir.clone(),
-            executable_path: plan.executable_path.clone(),
+            executable_path,
             previous_install_dir,
         })
     }
@@ -684,6 +706,16 @@ impl CoreStore {
                 .verify_artifact_bytes(&manifest, &executable_bytes)?;
         }
 
+        if self.require_signature {
+            let status = signature::authenticode_status(&canonical_executable);
+            if status != SignatureStatus::Verified {
+                return Err(CoreStoreError::SignatureRejected(format!(
+                    "{} executable signature is {status:?}, expected Verified",
+                    manifest.core_id
+                )));
+            }
+        }
+
         Ok(VerifiedCore {
             manifest,
             install_dir,
@@ -823,6 +855,40 @@ fn collect_installed_files_inner(
     Ok(())
 }
 
+fn resolve_staged_executable_path(
+    staging_dir: &Path,
+    expected_relative_path: &str,
+    files: &[InstalledCoreFile],
+) -> Result<String, CoreStoreError> {
+    validate_relative_path(expected_relative_path)?;
+    let expected = staging_dir.join(expected_relative_path);
+    if expected.exists() {
+        return Ok(expected_relative_path.to_string());
+    }
+
+    let expected_name = Path::new(expected_relative_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| CoreStoreError::UnsafePath(expected_relative_path.to_string()))?;
+    let matches = files
+        .iter()
+        .filter(|file| {
+            Path::new(&file.path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case(expected_name))
+        })
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [file] => Ok(file.path.clone()),
+        [] => Err(CoreStoreError::CoreMissing(expected)),
+        _ => Err(CoreStoreError::ManifestMismatch(format!(
+            "archive contains multiple possible executables named {expected_name}"
+        ))),
+    }
+}
+
 fn verify_installed_files(
     install_dir: &Path,
     files: &[InstalledCoreFile],
@@ -909,6 +975,8 @@ pub enum CoreStoreError {
     EmptyArchive,
     #[error("installed core executable is missing: {0}")]
     CoreMissing(PathBuf),
+    #[error("core signature rejected: {0}")]
+    SignatureRejected(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -1216,6 +1284,56 @@ mod tests {
     }
 
     #[test]
+    fn store_resolves_unique_nested_zip_executable_by_name() {
+        let root = temp_root();
+        let archive = zip_bytes(&[
+            (
+                "naiveproxy-v149.0.7827.114-1-win-x64/naive.exe",
+                b"trusted-core-binary".as_slice(),
+            ),
+            (
+                "naiveproxy-v149.0.7827.114-1-win-x64/LICENSE",
+                b"license text".as_slice(),
+            ),
+        ]);
+        let manifest = InstalledCoreManifest {
+            core_id: CoreId::from("naiveproxy"),
+            display_name: "NaiveProxy".to_string(),
+            version: "v149.0.7827.114-1".to_string(),
+            source_type: SourceType::GithubRelease,
+            owner: Some("klzgrad".to_string()),
+            repo: Some("naiveproxy".to_string()),
+            asset_name: "naiveproxy-v149.0.7827.114-1-win-x64.zip".to_string(),
+            executable_path: "naive.exe".to_string(),
+            sha256: sha256_hex(&archive),
+            signature_status: SignatureStatus::Unknown,
+            installed_at_unix_ms: 1,
+            files: Vec::new(),
+        };
+        let request = CoreInstallRequest {
+            manifest,
+            artifact: CoreArtifact::zip_archive(archive, "naive.exe"),
+        };
+        let store = CoreStore::new(&root);
+        let trusted_sources = trusted_sources_for(&request.manifest);
+        let result = store.install(&request, &trusted_sources).unwrap();
+
+        assert!(result.executable_path.exists());
+        assert_eq!(
+            result.manifest.executable_path,
+            "naiveproxy-v149.0.7827.114-1-win-x64/naive.exe"
+        );
+        store
+            .verify_core(
+                &CoreId::from("naiveproxy"),
+                "v149.0.7827.114-1",
+                &trusted_sources,
+            )
+            .unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn store_rejects_zip_slip_entries() {
         let root = temp_root();
         let archive = zip_bytes(&[("../escape.exe", b"trusted".as_slice())]);
@@ -1510,18 +1628,18 @@ mod tests {
 
     fn trusted_sources_for(manifest: &InstalledCoreManifest) -> Vec<TrustedCoreSource> {
         vec![TrustedCoreSource {
-            core_id: CoreId::from("sing-box"),
-            display_name: "sing-box".to_string(),
+            core_id: manifest.core_id.clone(),
+            display_name: manifest.display_name.clone(),
             source_type: SourceType::GithubRelease,
             status: SourceStatus::Active,
             homepage: Some("https://example.com".to_string()),
             license: Some("GPL-3.0-or-later".to_string()),
-            owner: Some("SagerNet".to_string()),
-            repo: Some("sing-box".to_string()),
+            owner: manifest.owner.clone(),
+            repo: manifest.repo.clone(),
             install_enabled: true,
             checksum_required: true,
             signature_preferred: true,
-            allowed_asset_patterns: vec!["sing-box-*-windows-amd64.zip".to_string()],
+            allowed_asset_patterns: vec![manifest.asset_name.clone()],
             pinned_release: Some(PinnedRelease {
                 version: manifest.version.clone(),
                 asset_name: manifest.asset_name.clone(),
@@ -1580,5 +1698,66 @@ mod tests {
         }
 
         output.into_inner()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn authenticode_status_never_verifies_unsigned_bytes() {
+        let dir = temp_root();
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fake.exe");
+        fs::write(&path, b"not a signed binary").unwrap();
+
+        // A non-signed / non-PE file must never come back Verified.
+        assert_ne!(authenticode_status(&path), SignatureStatus::Verified);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verify_core_enforces_signature_only_when_required() {
+        let root = temp_root();
+        let artifact_bytes = b"trusted-core-binary".to_vec();
+        let manifest = InstalledCoreManifest {
+            core_id: CoreId::from("sing-box"),
+            display_name: "sing-box".to_string(),
+            version: "1.0.0".to_string(),
+            source_type: SourceType::GithubRelease,
+            owner: Some("SagerNet".to_string()),
+            repo: Some("sing-box".to_string()),
+            asset_name: "sing-box-1.0.0-windows-amd64.zip".to_string(),
+            executable_path: "sing-box.exe".to_string(),
+            sha256: sha256_hex(&artifact_bytes),
+            signature_status: SignatureStatus::Unknown,
+            installed_at_unix_ms: 1,
+            files: Vec::new(),
+        };
+        let request = CoreInstallRequest {
+            manifest: manifest.clone(),
+            artifact: CoreArtifact::single_file(artifact_bytes, "sing-box.exe"),
+        };
+        let trusted = trusted_sources_for(&manifest);
+
+        // Install records the real (unsigned) signature status in the manifest.
+        let installed = CoreStore::new(&root).install(&request, &trusted).unwrap();
+        assert_ne!(
+            installed.manifest.signature_status,
+            SignatureStatus::Verified
+        );
+
+        // Default store does not enforce signatures -> verify passes.
+        CoreStore::new(&root)
+            .verify_core(&CoreId::from("sing-box"), "1.0.0", &trusted)
+            .unwrap();
+
+        // With signatures required, the unsigned core is rejected.
+        let error = CoreStore::new(&root)
+            .with_signature_required(true)
+            .verify_core(&CoreId::from("sing-box"), "1.0.0", &trusted)
+            .unwrap_err();
+        assert!(matches!(error, CoreStoreError::SignatureRejected(_)));
+
+        fs::remove_dir_all(root).unwrap();
     }
 }

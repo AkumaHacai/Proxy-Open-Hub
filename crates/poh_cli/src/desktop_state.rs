@@ -9,12 +9,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose, Engine as _};
 use poh_core::{
-    sha256_hex, CoreId, CoreRegistry, EndpointConfig, ImportInput, InstalledCoreFile,
+    sha256_hex, AdapterError, CoreId, CoreRegistry, EndpointConfig, ImportInput, InstalledCoreFile,
     InstalledCoreManifest, ListenerConfig, ListenerMode, LogLevel, NaiveProxyAdapter,
-    NaiveProxyCoreProfile, Profile, ProfileId, Redactor, RoutingMode, RoutingProfile,
-    SignatureStatus, SocksConfig, SourceType, TrustTunnelAdapter, TrustTunnelConfig,
-    TrustTunnelCoreProfile, TrustedCoreSource, TrustedSourcePolicy, TunConfig, UpstreamProtocol,
-    ValidationWarning,
+    NaiveProxyConfig, NaiveProxyCoreProfile, NaiveProxyEndpoint, Profile, ProfileId, Redactor,
+    RoutingMode, RoutingProfile, SettingsSection, SignatureStatus, SocksConfig, SourceType,
+    TrustTunnelAdapter, TrustTunnelConfig, TrustTunnelCoreProfile, TrustedCoreSource,
+    TrustedSourcePolicy, TunConfig, UpstreamProtocol, ValidationWarning,
 };
 use poh_core_runner::{MapSecretResolver, MaterializedRuntime, RuntimeMaterializer};
 use poh_core_session::{
@@ -26,8 +26,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::network_effects::{
-    apply_system_proxy_lease, prepare_system_proxy, restore_network_effects, NetworkEffectError,
-    NetworkEffectsState, SystemProxyConfig,
+    apply_system_proxy_lease, prepare_system_proxy, read_dns_lease, read_firewall_lease,
+    restore_network_effects, FirewallLease, NetworkEffectError, NetworkEffectsState, RouteLease,
+    SystemProxyConfig,
 };
 
 #[cfg(windows)]
@@ -73,6 +74,74 @@ pub struct DesktopSessionLog {
     pub running: bool,
     pub log_path: Option<String>,
     pub content: String,
+}
+
+// ── C1: list-profiles output ──────────────────────────────────────────────
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct DesktopProfileSummary {
+    pub id: String,
+    pub name: String,
+    pub core_id: String,
+    pub host: String,
+    pub summary: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct DesktopProfileList {
+    pub profiles: Vec<DesktopProfileSummary>,
+}
+
+// ── C3: core-schema output ────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CoreSchemaOutput {
+    pub core_id: String,
+    pub sections: Vec<SettingsSection>,
+}
+
+// ── C5: core-modes output ────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct DisabledMode {
+    pub mode: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CoreModesOutput {
+    pub core_id: String,
+    pub available: Vec<String>,
+    pub default: String,
+    pub disabled: Vec<DisabledMode>,
+}
+
+// ── C4: validate/update profile I/O ──────────────────────────────────────
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ProfileFieldsInput {
+    pub core_id: String,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub fields: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ValidateProfileOutput {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub warnings: Vec<ValidationWarning>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct UpdateProfileOutput {
+    pub ok: bool,
+    pub profile_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -176,8 +245,25 @@ pub fn start_desktop_session(
         .into_iter()
         .find(|profile| profile.id == profile_id)
         .ok_or_else(|| DesktopStateError::ProfileNotFound(profile_id.to_string()))?;
-    let system_proxy_config = system_proxy_config_for_profile(&desktop_profile)?;
+    // Resolve the explicit per-core routing mode (TUN / System Proxy / Local
+    // Proxy Gate). When set, it drives whether the OS system proxy is applied;
+    // when absent, the legacy listener flags are used (backward compatible).
+    let active_mode = match state
+        .active_mode_by_core
+        .get(desktop_profile.core_id.as_str())
+    {
+        Some(mode_str) => {
+            validate_active_mode(desktop_profile.core_id.as_str(), mode_str)?;
+            RoutingModeKind::parse(mode_str)
+        }
+        None => None,
+    };
+    let needs_dns_snapshot = should_snapshot_dns(&desktop_profile);
+    let needs_firewall_snapshot = should_snapshot_firewall(&desktop_profile);
+    let system_proxy_config = resolve_system_proxy_config(&desktop_profile, active_mode)?;
     let startup_probe = startup_probe_for_profile(&desktop_profile);
+    // Route lease is built from profile config (no I/O) before desktop_profile is consumed.
+    let route_lease_opt = route_lease_for_profile(&desktop_profile, 0); // ts updated after started_at_unix_ms
     let (profile, materialized, redacted_preview) =
         build_materialized_session(desktop_profile, &secrets)?;
     let launch_descriptor = CoreLaunchDescriptor::for_core(&profile.core_id).ok_or_else(|| {
@@ -188,6 +274,11 @@ pub fn start_desktop_session(
     let resolved_core = resolve_core(&profile.core_id)?;
     let executable_path = resolved_core.executable_path.clone();
     let started_at_unix_ms = now_unix_ms();
+    // Stamp the route lease with the real session timestamp now that we have it.
+    let route_lease_opt = route_lease_opt.map(|mut l| {
+        l.applied_at_unix_ms = started_at_unix_ms;
+        l
+    });
     let runtime_dir = runtime_root()?.join(format!(
         "{}-{}",
         sanitize_path_segment(profile.id.as_str()),
@@ -229,6 +320,34 @@ pub fn start_desktop_session(
         command.env(key, value);
     }
 
+    // Snapshot DNS and firewall before the core can change them. Both are
+    // best-effort: a failure logs a warning but does not abort the start so the
+    // user is not stuck if e.g. netsh is slow or unavailable.
+    let dns_lease_snapshot = if needs_dns_snapshot {
+        match read_dns_lease(started_at_unix_ms) {
+            Ok(lease) if !lease.interfaces.is_empty() => Some(lease),
+            Ok(_) => None,
+            Err(error) => {
+                eprintln!("Warning: could not snapshot DNS for safety-net: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let firewall_lease_snapshot: Option<FirewallLease> = if needs_firewall_snapshot {
+        match read_firewall_lease(started_at_unix_ms) {
+            Ok(lease) => Some(lease),
+            Err(error) => {
+                eprintln!("Warning: could not snapshot firewall rules for safety-net: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut child = command.spawn()?;
 
     let pid = child.id();
@@ -250,7 +369,16 @@ pub fn start_desktop_session(
         last_error: None,
         updated_at_unix_ms: started_at_unix_ms,
         creation_time_100ns,
-        network_effects: NetworkEffectsState::default(),
+        // Persist safety-net snapshots immediately so any Faulted path that
+        // follows will still have the pre-session network state on disk, allowing
+        // restore_network_effects to undo whatever the core managed to change
+        // before the readiness probe failed.
+        network_effects: NetworkEffectsState {
+            dns: dns_lease_snapshot,
+            routes: route_lease_opt,
+            firewall: firewall_lease_snapshot,
+            ..NetworkEffectsState::default()
+        },
     };
     if let Err(error) = save_session(&session) {
         let _ = child.kill();
@@ -270,6 +398,11 @@ pub fn start_desktop_session(
                 Err(DesktopStateError::CoreExitedDuringStartup(code, log_tail))
             }
             poh_core_session::SessionError::ReadinessTimedOut(address) => {
+                // Process is still running but didn't pass the probe — kill it
+                // now rather than waiting for the next reconcile, so network
+                // effects are restored promptly.
+                let _ = terminate_session_process(&session);
+                let _ = clear_persisted_session(Some(session));
                 Err(DesktopStateError::CoreReadinessTimedOut(address, log_tail))
             }
             other => Err(DesktopStateError::Session(other)),
@@ -568,6 +701,507 @@ pub fn preview_desktop_profile(input: &str) -> Result<DesktopImportPreview, Desk
     })
 }
 
+// ── C1: desktop-list-profiles ─────────────────────────────────────────────
+
+pub fn list_desktop_profiles(state_path: &Path) -> Result<DesktopProfileList, DesktopStateError> {
+    let state = load_or_default_desktop_state(state_path)?;
+    let profiles = state.profiles.into_iter().map(profile_summary).collect();
+    Ok(DesktopProfileList { profiles })
+}
+
+fn profile_summary(p: DesktopProfile) -> DesktopProfileSummary {
+    let core_id = if p.core_id.is_empty() {
+        "trusttunnel".to_string()
+    } else {
+        p.core_id.clone()
+    };
+    let name = if p.display_name.is_empty() {
+        p.endpoint.hostname.clone()
+    } else {
+        p.display_name.clone()
+    };
+
+    let (host, summary) = if p.core_config.is_some() {
+        // Generic core profile (NaiveProxy etc.)
+        let host = naive_profile_host(&p);
+        let summary = naive_profile_summary(&p);
+        (host, summary)
+    } else {
+        // TrustTunnel legacy format
+        let host = p.endpoint.hostname.clone();
+        let summary = tt_profile_summary(&p);
+        (host, summary)
+    };
+
+    DesktopProfileSummary {
+        id: p.id,
+        name,
+        core_id,
+        host,
+        summary,
+        tags: Vec::new(),
+    }
+}
+
+fn naive_profile_host(p: &DesktopProfile) -> String {
+    p.core_config
+        .as_ref()
+        .and_then(|v| v.get("config"))
+        .and_then(|v| v.get("proxy"))
+        .and_then(|v| v.get("host"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn naive_profile_summary(p: &DesktopProfile) -> String {
+    let scheme = p
+        .core_config
+        .as_ref()
+        .and_then(|v| v.get("config"))
+        .and_then(|v| v.get("proxy"))
+        .and_then(|v| v.get("scheme"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("https")
+        .to_uppercase();
+    let listen_scheme = p
+        .core_config
+        .as_ref()
+        .and_then(|v| v.get("config"))
+        .and_then(|v| v.get("listen"))
+        .and_then(|v| v.get("scheme"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("socks")
+        .to_uppercase();
+    format!("{scheme} · {listen_scheme}")
+}
+
+fn tt_profile_summary(p: &DesktopProfile) -> String {
+    let protocol = match p.endpoint.upstream_protocol {
+        0 => "HTTP/2",
+        1 => "HTTP/3",
+        _ => "HTTP/2",
+    };
+    let mode = match p.listener.mode {
+        1 => "SOCKS",
+        _ => "TUN",
+    };
+    format!("{protocol} · {mode}")
+}
+
+// ── C3: desktop-core-schema ───────────────────────────────────────────────
+
+pub fn core_schema(core_id: &str) -> Result<CoreSchemaOutput, DesktopStateError> {
+    let registry = desktop_core_registry();
+    let adapter = registry
+        .adapter(&CoreId::from(core_id))
+        .ok_or_else(|| DesktopStateError::CoreAdapterNotFound(core_id.to_string()))?;
+    let schema = adapter.settings_schema();
+    Ok(CoreSchemaOutput {
+        core_id: core_id.to_string(),
+        sections: schema.sections,
+    })
+}
+
+// ── C5: desktop-core-modes ────────────────────────────────────────────────
+
+pub fn core_modes(core_id: &str) -> Result<CoreModesOutput, DesktopStateError> {
+    let registry = desktop_core_registry();
+    let adapter = registry
+        .adapter(&CoreId::from(core_id))
+        .ok_or_else(|| DesktopStateError::CoreAdapterNotFound(core_id.to_string()))?;
+    let caps = &adapter.manifest().capabilities;
+
+    let mut available: Vec<String> = Vec::new();
+    let mut disabled: Vec<DisabledMode> = Vec::new();
+
+    if caps.supports_tun {
+        available.push("tun".to_string());
+    } else {
+        disabled.push(DisabledMode {
+            mode: "tun".to_string(),
+            reason: "Requires sing-box helper (not installed)".to_string(),
+        });
+    }
+
+    if caps.supports_system_proxy && (caps.supports_socks || caps.supports_http_proxy) {
+        available.push("system_proxy".to_string());
+    } else {
+        disabled.push(DisabledMode {
+            mode: "system_proxy".to_string(),
+            reason: "Core does not support system proxy".to_string(),
+        });
+    }
+
+    if caps.supports_socks || caps.supports_http_proxy {
+        available.push("local_proxy_gate".to_string());
+    } else {
+        disabled.push(DisabledMode {
+            mode: "local_proxy_gate".to_string(),
+            reason: "Core does not expose a local SOCKS or HTTP listener".to_string(),
+        });
+    }
+
+    let default_mode = if available.contains(&"tun".to_string()) {
+        "tun".to_string()
+    } else if available.contains(&"local_proxy_gate".to_string()) {
+        "local_proxy_gate".to_string()
+    } else {
+        available.first().cloned().unwrap_or_default()
+    };
+
+    Ok(CoreModesOutput {
+        core_id: core_id.to_string(),
+        available,
+        default: default_mode,
+        disabled,
+    })
+}
+
+// ── C4: desktop-validate-profile / desktop-update-profile ────────────────
+
+pub fn validate_desktop_profile(
+    state_path: &Path,
+    input: ProfileFieldsInput,
+) -> Result<ValidateProfileOutput, DesktopStateError> {
+    let registry = desktop_core_registry();
+    let core_id = CoreId::from(input.core_id.as_str());
+    let adapter = registry
+        .adapter(&core_id)
+        .ok_or_else(|| DesktopStateError::CoreAdapterNotFound(input.core_id.clone()))?;
+
+    let state = load_or_default_desktop_state(state_path)?;
+    let secrets = state.resolved_secrets()?;
+
+    let profile = match fields_to_profile(&core_id, &input, &secrets) {
+        Ok(p) => p,
+        Err(error) => {
+            return Ok(ValidateProfileOutput {
+                ok: false,
+                error: Some(error),
+                warnings: Vec::new(),
+            });
+        }
+    };
+
+    match adapter.validate(&profile) {
+        Ok(warnings) => Ok(ValidateProfileOutput {
+            ok: true,
+            error: None,
+            warnings,
+        }),
+        Err(AdapterError::InvalidProfile(msg)) => Ok(ValidateProfileOutput {
+            ok: false,
+            error: Some(msg),
+            warnings: Vec::new(),
+        }),
+        Err(error) => Err(DesktopStateError::CoreAdapterNotFound(error.to_string())),
+    }
+}
+
+pub fn update_desktop_profile(
+    state_path: &Path,
+    input: ProfileFieldsInput,
+) -> Result<UpdateProfileOutput, DesktopStateError> {
+    let core_id = CoreId::from(input.core_id.as_str());
+    let mut state = load_or_default_desktop_state(state_path)?;
+
+    let profile_id = if let Some(ref existing_id) = input.profile_id {
+        existing_id.clone()
+    } else {
+        unique_profile_id(&format!("{}:profile", input.core_id), &state)
+    };
+
+    let (desktop_profile, new_secrets) =
+        fields_to_desktop_profile(profile_id.clone(), &core_id, &input)?;
+
+    // Replace or append
+    if let Some(pos) = state.profiles.iter().position(|p| p.id == profile_id) {
+        state.profiles[pos] = desktop_profile;
+    } else {
+        state.profiles.push(desktop_profile);
+    }
+    state.insert_protected_secrets(new_secrets)?;
+    save_desktop_state(state_path, &state)?;
+
+    Ok(UpdateProfileOutput {
+        ok: true,
+        profile_id,
+    })
+}
+
+/// Build a `Profile` from flat fields for validation (no I/O side effects).
+fn fields_to_profile(
+    core_id: &CoreId,
+    input: &ProfileFieldsInput,
+    state_secrets: &BTreeMap<String, String>,
+) -> Result<Profile, String> {
+    let profile_id = input
+        .profile_id
+        .clone()
+        .unwrap_or_else(|| format!("{}:preview", core_id));
+
+    if core_id.as_str() == "naiveproxy" {
+        let core_config = naive_fields_to_core_config(&input.fields, &profile_id, state_secrets);
+        Ok(Profile::new(
+            ProfileId::new(profile_id),
+            input
+                .display_name
+                .clone()
+                .unwrap_or_else(|| "preview".to_string()),
+            core_id.clone(),
+            core_config,
+        ))
+    } else if core_id.as_str() == "trusttunnel" {
+        let dp = tt_fields_to_desktop_profile(&profile_id, input, &mut BTreeMap::new());
+        dp.into_profile().map_err(|e| e.to_string())
+    } else {
+        Err(format!("unknown core: {core_id}"))
+    }
+}
+
+/// Build a `DesktopProfile` and extracted secrets from flat fields for saving.
+fn fields_to_desktop_profile(
+    profile_id: String,
+    core_id: &CoreId,
+    input: &ProfileFieldsInput,
+) -> Result<(DesktopProfile, BTreeMap<String, String>), DesktopStateError> {
+    if core_id.as_str() == "naiveproxy" {
+        let mut raw_secrets: BTreeMap<String, String> = BTreeMap::new();
+        let core_config =
+            naive_fields_to_core_config_saving(&input.fields, &profile_id, &mut raw_secrets);
+        let display_name = input
+            .display_name
+            .clone()
+            .unwrap_or_else(|| profile_id.clone());
+
+        let mut secret_refs: BTreeMap<String, String> = BTreeMap::new();
+        for key in raw_secrets.keys() {
+            secret_refs.insert(key.clone(), format!("secret://{}", key));
+        }
+
+        let dp = DesktopProfile {
+            id: profile_id.clone(),
+            display_name,
+            core_id: core_id.to_string(),
+            core_config: Some(core_config),
+            secret_refs,
+            ..DesktopProfile::default()
+        };
+        Ok((dp, raw_secrets))
+    } else if core_id.as_str() == "trusttunnel" {
+        let mut raw_secrets: BTreeMap<String, String> = BTreeMap::new();
+        let dp = tt_fields_to_desktop_profile(&profile_id, input, &mut raw_secrets);
+        Ok((dp, raw_secrets))
+    } else {
+        Err(DesktopStateError::CoreAdapterNotFound(core_id.to_string()))
+    }
+}
+
+// ── Field-mapping helpers: NaiveProxy ─────────────────────────────────────
+
+fn naive_fields_to_core_config(
+    fields: &BTreeMap<String, serde_json::Value>,
+    profile_id: &str,
+    state_secrets: &BTreeMap<String, String>,
+) -> serde_json::Value {
+    let mut dummy_secrets: BTreeMap<String, String> = BTreeMap::new();
+    let mut core_config =
+        naive_fields_to_core_config_saving(fields, profile_id, &mut dummy_secrets);
+
+    // For validation: if proxy.password is a secret-ref, use the resolved value if available
+    // so the adapter can check non-emptiness. If not available, it stays as the ref string.
+    if let Some(secret_ref_str) = fields
+        .get("proxy.password")
+        .and_then(|v| v.as_str())
+        .filter(|s| s.starts_with("secret://"))
+    {
+        let key = secret_ref_str.trim_start_matches("secret://");
+        let resolved = state_secrets.get(key).cloned().unwrap_or_default();
+        if let Some(proxy) = core_config
+            .get_mut("config")
+            .and_then(|c| c.get_mut("proxy"))
+        {
+            proxy["password_secret_ref"] = serde_json::Value::String(resolved);
+        }
+    }
+    core_config
+}
+
+fn naive_fields_to_core_config_saving(
+    fields: &BTreeMap<String, serde_json::Value>,
+    profile_id: &str,
+    out_secrets: &mut BTreeMap<String, String>,
+) -> serde_json::Value {
+    let str_field = |key: &str| {
+        fields
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let u16_field = |key: &str| fields.get(key).and_then(|v| v.as_u64()).map(|n| n as u16);
+    let bool_field = |key: &str| fields.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+    let u32_opt_field = |key: &str| fields.get(key).and_then(|v| v.as_u64()).map(|n| n as u32);
+
+    // Handle proxy password secret
+    let proxy_password_ref = extract_secret(fields, "proxy.password", profile_id, out_secrets);
+    let listen_password_ref = extract_secret(fields, "listen.password", profile_id, out_secrets);
+
+    // Extra headers: multiline string → Vec<String>
+    let extra_headers: Vec<String> = fields
+        .get("extra_headers")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let config = NaiveProxyCoreProfile {
+        source_format: "fields".to_string(),
+        config: NaiveProxyConfig {
+            proxy: NaiveProxyEndpoint {
+                scheme: str_field("proxy.scheme"),
+                host: str_field("proxy.host"),
+                port: u16_field("proxy.port"),
+                username: str_field("proxy.username"),
+                password_secret_ref: proxy_password_ref,
+                path: String::new(),
+                query: String::new(),
+            },
+            listen: NaiveProxyEndpoint {
+                scheme: if str_field("listen.scheme").is_empty() {
+                    "socks".to_string()
+                } else {
+                    str_field("listen.scheme")
+                },
+                host: if str_field("listen.host").is_empty() {
+                    "127.0.0.1".to_string()
+                } else {
+                    str_field("listen.host")
+                },
+                port: u16_field("listen.port"),
+                username: str_field("listen.username"),
+                password_secret_ref: listen_password_ref,
+                path: String::new(),
+                query: String::new(),
+            },
+            extra_headers,
+            host_resolver_rules: str_field("host_resolver_rules"),
+            resolver_range: String::new(),
+            tunnel_timeout: String::new(),
+            idle_timeout: String::new(),
+            insecure_concurrency: u32_opt_field("insecure_concurrency"),
+            no_post_quantum: bool_field("no_post_quantum"),
+        },
+    };
+    serde_json::to_value(config).unwrap_or(serde_json::Value::Null)
+}
+
+// ── Field-mapping helpers: TrustTunnel ───────────────────────────────────
+
+fn tt_fields_to_desktop_profile(
+    profile_id: &str,
+    input: &ProfileFieldsInput,
+    out_secrets: &mut BTreeMap<String, String>,
+) -> DesktopProfile {
+    let f = &input.fields;
+    let str_field = |key: &str| {
+        f.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let bool_field = |key: &str| f.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let password_ref = extract_secret(f, "password", profile_id, out_secrets);
+    let socks_password_ref = extract_secret(f, "socks_password", profile_id, out_secrets);
+
+    // addresses: multiline → Vec<String>
+    let addresses: Vec<String> = str_field("addresses")
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    // vpn_mode: "general"=0, "selective"=1
+    let routing_mode = match str_field("vpn_mode").as_str() {
+        "selective" | "whitelist" | "blacklist" => 1,
+        _ => 0,
+    };
+
+    // upstream_protocol: "http2"=0, "http3"=1
+    let upstream_protocol = match str_field("upstream_protocol").as_str() {
+        "http3" => 1,
+        _ => 0,
+    };
+
+    // listener mode: tun_enabled=true → 0 (TUN), false → 1 (SOCKS)
+    let listener_mode = if bool_field("tun_enabled") { 0 } else { 1 };
+
+    let display_name = input
+        .display_name
+        .clone()
+        .unwrap_or_else(|| str_field("hostname"));
+
+    DesktopProfile {
+        id: profile_id.to_string(),
+        display_name,
+        core_id: "trusttunnel".to_string(),
+        core_config: None,
+        secret_refs: BTreeMap::new(),
+        endpoint: DesktopEndpoint {
+            hostname: str_field("hostname"),
+            addresses,
+            username: str_field("username"),
+            password_secret_ref: password_ref,
+            upstream_protocol,
+            ..DesktopEndpoint::default()
+        },
+        listener: DesktopListener {
+            mode: listener_mode,
+            socks: DesktopSocks {
+                address: str_field("socks_address"),
+                username: str_field("socks_username"),
+                password_secret_ref: socks_password_ref,
+                http_proxy_address: str_field("http_address"),
+                ..DesktopSocks::default()
+            },
+            ..DesktopListener::default()
+        },
+        routing: DesktopRouting {
+            mode: routing_mode,
+            ..DesktopRouting::default()
+        },
+    }
+}
+
+/// Extract a secret field: if value starts with `"secret://"`, keep as-is (existing ref).
+/// Otherwise it's a new plaintext value — store in `out_secrets` under
+/// `"<profile_id>/<field_key>"` and return that key as the ref.
+/// Returns the secret-ref key (not the plaintext value).
+fn extract_secret(
+    fields: &BTreeMap<String, serde_json::Value>,
+    field_key: &str,
+    profile_id: &str,
+    out_secrets: &mut BTreeMap<String, String>,
+) -> String {
+    let raw = fields.get(field_key).and_then(|v| v.as_str()).unwrap_or("");
+    if raw.is_empty() {
+        return String::new();
+    }
+    if let Some(key) = raw.strip_prefix("secret://") {
+        return key.to_string();
+    }
+    // Plaintext new value
+    let key = format!("{profile_id}/{field_key}");
+    out_secrets.insert(key.clone(), raw.to_string());
+    key
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 fn load_desktop_state(state_path: &Path) -> Result<DesktopState, DesktopStateError> {
     let metadata = fs::metadata(state_path)?;
     if metadata.len() > MAX_STATE_BYTES {
@@ -577,7 +1211,7 @@ fn load_desktop_state(state_path: &Path) -> Result<DesktopState, DesktopStateErr
     }
 
     let content = fs::read_to_string(state_path)?;
-    let mut state = serde_json::from_str::<DesktopState>(&content)?;
+    let mut state = serde_json::from_str::<DesktopState>(strip_utf8_bom(&content))?;
     if state.migrate_plaintext_secrets()? {
         save_desktop_state(state_path, &state)?;
     }
@@ -596,6 +1230,10 @@ fn load_or_default_desktop_state(state_path: &Path) -> Result<DesktopState, Desk
     }
 
     Ok(DesktopState::default())
+}
+
+fn strip_utf8_bom(content: &str) -> &str {
+    content.strip_prefix('\u{feff}').unwrap_or(content)
 }
 
 fn save_desktop_state(state_path: &Path, state: &DesktopState) -> Result<(), DesktopStateError> {
@@ -875,15 +1513,15 @@ pub enum DesktopStateError {
     SessionAlreadyRunning(u32),
     #[error("core adapter is not registered: {0}")]
     CoreAdapterNotFound(String),
-    #[error("TrustTunnel client executable was not found")]
+    #[error("core executable was not found")]
     CoreExecutableNotFound,
-    #[error("invalid TrustTunnel client executable path: {0}")]
+    #[error("invalid core executable path: {0}")]
     InvalidCorePath(PathBuf),
     #[error("runtime config was not materialized: {0}")]
     RuntimeConfigMissing(String),
-    #[error("TrustTunnel core exited during startup with code {0:?}: {1}")]
+    #[error("core exited during startup with code {0:?}: {1}")]
     CoreExitedDuringStartup(Option<i32>, String),
-    #[error("TrustTunnel readiness probe timed out for {0}: {1}")]
+    #[error("core readiness probe timed out for {0}: {1}")]
     CoreReadinessTimedOut(String, String),
     #[error("import input is too large: {0} bytes")]
     ImportTooLarge(usize),
@@ -907,6 +1545,8 @@ pub enum DesktopStateError {
     },
     #[error("invalid system proxy configuration: {0}")]
     InvalidSystemProxyConfig(String),
+    #[error("routing mode \"{mode}\" is not available for core {core}")]
+    RoutingModeUnavailable { core: String, mode: String },
     #[error("bundled core sidecar is missing: {0}")]
     CoreSidecarMissing(String),
     #[error(transparent)]
@@ -948,8 +1588,16 @@ fn resolve_core(core_id: &CoreId) -> Result<ResolvedCore, DesktopStateError> {
 }
 
 fn resolve_store_core(core_id: &CoreId) -> Result<ResolvedCore, DesktopStateError> {
-    let store = CoreStore::new(core_store_root());
     let sources = embedded_trusted_sources()?;
+    // Enforce Authenticode signature only for sources that declare it preferred.
+    // NaiveProxy (klzgrad) ships unsigned binaries; SHA-256 pinning is the sole
+    // integrity check for those.  Future signed cores (sing-box, xray-core, …)
+    // will have signature_preferred: true and will require a valid chain.
+    let require_signature = sources
+        .iter()
+        .find(|s| &s.core_id == core_id)
+        .is_some_and(|s| s.signature_preferred);
+    let store = CoreStore::new(core_store_root()).with_signature_required(require_signature);
     let version = store
         .active_version(core_id)?
         .ok_or_else(|| DesktopStateError::CoreNotInstalled(core_id.to_string()))?;
@@ -1191,6 +1839,53 @@ fn clear_persisted_session(
     Ok(())
 }
 
+fn should_snapshot_dns(profile: &DesktopProfile) -> bool {
+    // TUN mode (mode 0) + change_system_dns: the core will redirect system DNS
+    // to a tunnel resolver. Snapshot current DNS so we can restore it on any
+    // teardown path, including crash / force-kill.
+    profile.listener.mode == 0 && profile.listener.tun.change_system_dns
+}
+
+/// Build a `RouteLease` from the profile's TUN config. Returns `None` when the
+/// profile is not TUN mode, has no device name configured, or has no included
+/// routes — in those cases we skip route cleanup (wintun auto-tears-down on
+/// adapter removal anyway, so there is nothing to clean up for most scenarios).
+fn route_lease_for_profile(
+    profile: &DesktopProfile,
+    applied_at_unix_ms: u64,
+) -> Option<RouteLease> {
+    if profile.listener.mode != 0 {
+        return None;
+    }
+    let device_name = profile.listener.tun.device_name.trim().to_string();
+    if device_name.is_empty() {
+        return None;
+    }
+    let configured_routes: Vec<String> = profile
+        .listener
+        .tun
+        .included_routes
+        .iter()
+        .filter(|r| !r.trim().is_empty())
+        .cloned()
+        .collect();
+    if configured_routes.is_empty() {
+        return None;
+    }
+    Some(RouteLease {
+        tun_interface: device_name,
+        configured_routes,
+        applied_at_unix_ms,
+    })
+}
+
+/// Returns `true` when the profile would activate a kill-switch firewall and
+/// a pre-session snapshot of Windows Firewall rules should be taken so those
+/// rules can be removed if the core crashes without cleaning up.
+fn should_snapshot_firewall(profile: &DesktopProfile) -> bool {
+    profile.listener.mode == 0 && profile.routing.kill_switch_enabled
+}
+
 fn startup_probe_for_profile(profile: &DesktopProfile) -> SessionStartupProbe {
     if let Some(probe) = startup_probe_for_generic_profile(profile) {
         return probe;
@@ -1242,6 +1937,60 @@ fn startup_timings_for_probe(probe: &SessionStartupProbe) -> SessionTimings {
 
 const DEFAULT_PROXY_OVERRIDE: &str = "<local>";
 
+/// Routing mode selected by the user (persisted per core in `active_mode_by_core`).
+/// Mirrors the strings exposed by `desktop-core-modes` and the CLI contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoutingModeKind {
+    Tun,
+    SystemProxy,
+    LocalProxyGate,
+}
+
+impl RoutingModeKind {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "tun" => Some(Self::Tun),
+            "system_proxy" => Some(Self::SystemProxy),
+            "local_proxy_gate" => Some(Self::LocalProxyGate),
+            _ => None,
+        }
+    }
+}
+
+/// Validate that an explicitly selected routing mode is actually available for the
+/// core (e.g. NaiveProxy cannot use `tun` until the sing-box helper is installed).
+fn validate_active_mode(core_id: &str, mode: &str) -> Result<(), DesktopStateError> {
+    let modes = core_modes(core_id)?;
+    if modes.available.iter().any(|available| available == mode) {
+        Ok(())
+    } else {
+        Err(DesktopStateError::RoutingModeUnavailable {
+            core: core_id.to_string(),
+            mode: mode.to_string(),
+        })
+    }
+}
+
+/// Resolve the system-proxy configuration for a session, honoring the explicit
+/// per-core routing mode when one is selected:
+/// - `SystemProxy`              -> always apply the OS proxy pointed at the core's
+///   local listener (overrides the legacy `listener.system_proxy.enabled` flag);
+/// - `LocalProxyGate` / `Tun`   -> never apply the OS proxy;
+/// - `None` (no explicit mode)  -> legacy behaviour driven by the profile flag.
+fn resolve_system_proxy_config(
+    profile: &DesktopProfile,
+    mode: Option<RoutingModeKind>,
+) -> Result<Option<SystemProxyConfig>, DesktopStateError> {
+    match mode {
+        Some(RoutingModeKind::SystemProxy) => Ok(Some(SystemProxyConfig::new(
+            system_proxy_server_for_core(profile)?,
+            system_proxy_override_value(profile),
+        ))),
+        Some(RoutingModeKind::LocalProxyGate) | Some(RoutingModeKind::Tun) => Ok(None),
+        None => system_proxy_config_for_profile(profile),
+    }
+}
+
 fn system_proxy_config_for_profile(
     profile: &DesktopProfile,
 ) -> Result<Option<SystemProxyConfig>, DesktopStateError> {
@@ -1249,33 +1998,31 @@ fn system_proxy_config_for_profile(
         return Ok(None);
     }
 
-    let proxy_server = match profile.core_id.as_str() {
-        "" | "trusttunnel" => trusttunnel_system_proxy_server(profile)?,
-        "naiveproxy" => naiveproxy_system_proxy_server(profile)?,
-        core_id => {
-            return Err(DesktopStateError::InvalidSystemProxyConfig(format!(
-                "core {core_id} does not expose a known local proxy listener"
-            )));
-        }
-    };
-    let proxy_override = if profile
-        .listener
-        .system_proxy
-        .proxy_override
-        .trim()
-        .is_empty()
-    {
+    Ok(Some(SystemProxyConfig::new(
+        system_proxy_server_for_core(profile)?,
+        system_proxy_override_value(profile),
+    )))
+}
+
+/// Derive the `host=addr;https=addr` proxy-server string from the core's local
+/// listener, independent of whether the legacy system-proxy flag is set.
+fn system_proxy_server_for_core(profile: &DesktopProfile) -> Result<String, DesktopStateError> {
+    match profile.core_id.as_str() {
+        "" | "trusttunnel" => trusttunnel_system_proxy_server(profile),
+        "naiveproxy" => naiveproxy_system_proxy_server(profile),
+        core_id => Err(DesktopStateError::InvalidSystemProxyConfig(format!(
+            "core {core_id} does not expose a known local proxy listener"
+        ))),
+    }
+}
+
+fn system_proxy_override_value(profile: &DesktopProfile) -> String {
+    let configured = profile.listener.system_proxy.proxy_override.trim();
+    if configured.is_empty() {
         DEFAULT_PROXY_OVERRIDE.to_string()
     } else {
-        profile
-            .listener
-            .system_proxy
-            .proxy_override
-            .trim()
-            .to_string()
-    };
-
-    Ok(Some(SystemProxyConfig::new(proxy_server, proxy_override)))
+        configured.to_string()
+    }
 }
 
 fn trusttunnel_system_proxy_server(profile: &DesktopProfile) -> Result<String, DesktopStateError> {
@@ -1895,6 +2642,34 @@ fn now_unix_ms() -> u64 {
         .unwrap_or_default()
 }
 
+// ── C6: route preset model ────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct RoutePresetRules {
+    #[serde(rename = "AppExeNames", default)]
+    pub app_exe_names: String,
+    #[serde(rename = "IncludedDomains", default)]
+    pub included_domains: String,
+    #[serde(rename = "ExcludedDomains", default)]
+    pub excluded_domains: String,
+    #[serde(rename = "IncludedCidrs", default)]
+    pub included_cidrs: String,
+    #[serde(rename = "ExcludedCidrs", default)]
+    pub excluded_cidrs: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct RoutePreset {
+    #[serde(rename = "Id")]
+    pub id: String,
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Rules", default)]
+    pub rules: RoutePresetRules,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct DesktopState {
     #[serde(rename = "Profiles", default)]
@@ -1907,6 +2682,27 @@ struct DesktopState {
     legacy_secrets: BTreeMap<String, String>,
     #[serde(rename = "ProtectedSecrets", default)]
     protected_secrets: BTreeMap<String, String>,
+    /// Per-core user-defined route presets (Variant A). UI writes these directly.
+    #[serde(
+        rename = "RoutePresetsByCore",
+        default,
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    route_presets_by_core: BTreeMap<String, Vec<RoutePreset>>,
+    /// Active preset id per core (matches a `RoutePreset.id` in `route_presets_by_core`).
+    #[serde(
+        rename = "ActiveRouteByCore",
+        default,
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    active_route_by_core: BTreeMap<String, String>,
+    /// Active routing mode per core ("tun" | "system_proxy" | "local_proxy_gate").
+    #[serde(
+        rename = "ActiveModeByCore",
+        default,
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    active_mode_by_core: BTreeMap<String, String>,
 }
 
 impl DesktopState {
@@ -2265,6 +3061,258 @@ fn listener_mode_to_desktop(value: ListenerMode) -> i32 {
     }
 }
 
+// ─── Tier-2 Supervisor ────────────────────────────────────────────────────────
+
+/// Windows Job Object RAII wrapper.  Dropping this handle triggers
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, which terminates every process inside
+/// the Job — including the core if the supervisor itself crashes before cleaning
+/// up gracefully.
+#[cfg(windows)]
+struct JobHandle {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl JobHandle {
+    fn create_kill_on_close() -> Option<Self> {
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle.is_null() {
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION as *const _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+                return None;
+            }
+            Some(JobHandle { handle })
+        }
+    }
+
+    fn assign_pid(&self, pid: u32) -> bool {
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_ALL_ACCESS};
+        unsafe {
+            let process = OpenProcess(PROCESS_ALL_ACCESS, 0, pid);
+            if process.is_null() {
+                return false;
+            }
+            let ok = AssignProcessToJobObject(self.handle, process);
+            windows_sys::Win32::Foundation::CloseHandle(process);
+            ok != 0
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
+/// Cross-platform process liveness monitor used by the supervisor loop.
+/// On Windows, opens a `PROCESS_SYNCHRONIZE` handle once at construction so
+/// that PID recycling cannot cause `WaitForSingleObject` to observe the wrong
+/// process — the handle is tied to the kernel process object, not the PID.
+struct CoreWatcher {
+    #[allow(dead_code)]
+    pid: u32,
+    #[cfg(windows)]
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+impl CoreWatcher {
+    #[cfg(windows)]
+    fn new(pid: u32) -> Self {
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        CoreWatcher { pid, handle }
+    }
+
+    #[cfg(not(windows))]
+    fn new(pid: u32) -> Self {
+        CoreWatcher { pid }
+    }
+
+    /// Blocks up to `timeout_ms` milliseconds waiting for the core to exit.
+    /// Returns `true` if the core exited within the window, `false` if still alive.
+    #[cfg(windows)]
+    fn wait_ms(&self, timeout_ms: u32) -> bool {
+        use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        if self.handle.is_null() {
+            return true; // Could not open = process already gone.
+        }
+        unsafe { WaitForSingleObject(self.handle, timeout_ms) != WAIT_TIMEOUT }
+    }
+
+    #[cfg(not(windows))]
+    fn wait_ms(&self, timeout_ms: u32) -> bool {
+        thread::sleep(Duration::from_millis(u64::from(timeout_ms)));
+        // `kill -0` probes process liveness without sending a real signal.
+        !Command::new("kill")
+            .args(["-0", &self.pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for CoreWatcher {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
+fn supervisor_emit(event: serde_json::Value) {
+    if let Ok(s) = serde_json::to_string(&event) {
+        println!("{s}");
+    }
+}
+
+fn supervisor_is_stop_command(line: &str) -> bool {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+        v.get("command").and_then(|c| c.as_str()) == Some("stop")
+    } else {
+        false
+    }
+}
+
+/// Long-lived supervisor process.  Flutter launches this with `Process.start`
+/// and keeps its stdin open; when Flutter closes stdin (normal exit) or crashes
+/// (OS closes the broken pipe), the supervisor detects the EOF, stops the core,
+/// restores all network effects, and exits — leaving no orphaned processes or
+/// broken network state.
+///
+/// # stdout protocol (JSON lines)
+/// - `{"type":"started","pid":N,...}` — core is ready; supervisor enters watch loop
+/// - `{"type":"stopping","reason":"<command|stdin_eof>"}` — graceful stop in progress
+/// - `{"type":"stopped"}` — core confirmed stopped; supervisor exiting
+/// - `{"type":"faulted","reason":"core_crash"}` — core died; network already restored
+///
+/// # stdin protocol (JSON lines)
+/// - `{"command":"stop"}` — graceful stop request
+/// - EOF (pipe close) — also triggers graceful stop
+pub fn supervise_desktop_session(
+    state_path: &Path,
+    profile_id: &str,
+) -> Result<(), DesktopStateError> {
+    // ── Phase 1: start the core via the existing session path ─────────────────
+    let start = start_desktop_session(state_path, profile_id)?;
+    let pid = start.pid;
+
+    // ── Phase 2: Job Object (best-effort) ─────────────────────────────────────
+    // `_job` is held for the supervisor's lifetime; dropping it triggers
+    // `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and kills the core if the supervisor
+    // itself exits or crashes without calling stop_desktop_session first.
+    #[cfg(windows)]
+    let _job: Option<JobHandle> = match JobHandle::create_kill_on_close() {
+        Some(job) => {
+            if !job.assign_pid(pid) {
+                eprintln!("[supervisor] Warning: could not assign core PID {pid} to Job Object");
+            }
+            Some(job)
+        }
+        None => {
+            eprintln!(
+                "[supervisor] Warning: Job Object creation failed; core will not be \
+                 auto-killed on supervisor crash"
+            );
+            None
+        }
+    };
+
+    // ── Phase 3: open a liveness handle for fast crash detection ──────────────
+    let watcher = CoreWatcher::new(pid);
+
+    // ── Phase 4: signal readiness to Flutter ──────────────────────────────────
+    supervisor_emit(serde_json::json!({
+        "type": "started",
+        "pid": start.pid,
+        "profile_id": start.profile_id,
+        "profile_name": start.profile_name,
+        "core_id": start.core_id,
+        "log_path": start.log_path,
+        "started_at_unix_ms": start.started_at_unix_ms,
+    }));
+
+    // ── Phase 5: spawn a blocking stdin-reader thread ─────────────────────────
+    // Sends `Some(line)` for each received command, `None` on EOF.
+    let (stdin_tx, stdin_rx) = std::sync::mpsc::channel::<Option<String>>();
+    thread::spawn(move || {
+        use std::io::BufRead;
+        let stdin_handle = std::io::stdin();
+        let reader = std::io::BufReader::new(stdin_handle.lock());
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    if stdin_tx.send(Some(line)).is_err() {
+                        return;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = stdin_tx.send(None); // EOF sentinel
+    });
+
+    // ── Phase 6: monitoring loop ──────────────────────────────────────────────
+    loop {
+        // Block on the core process for up to 500 ms; returns early on exit.
+        let core_exited = watcher.wait_ms(500);
+
+        // Drain all pending stdin messages regardless of core state.
+        loop {
+            use std::sync::mpsc::TryRecvError;
+            match stdin_rx.try_recv() {
+                Ok(None) | Err(TryRecvError::Disconnected) => {
+                    // Flutter closed stdin (normal exit or crash).
+                    supervisor_emit(serde_json::json!({"type":"stopping","reason":"stdin_eof"}));
+                    let _ = stop_desktop_session();
+                    supervisor_emit(serde_json::json!({"type":"stopped"}));
+                    return Ok(());
+                }
+                Ok(Some(line)) => {
+                    if supervisor_is_stop_command(&line) {
+                        supervisor_emit(serde_json::json!({"type":"stopping","reason":"command"}));
+                        let _ = stop_desktop_session();
+                        supervisor_emit(serde_json::json!({"type":"stopped"}));
+                        return Ok(());
+                    }
+                    // Unknown commands are silently ignored.
+                }
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+
+        if core_exited {
+            // Restore network effects before notifying Flutter so the OS is clean.
+            let _ = stop_desktop_session();
+            supervisor_emit(serde_json::json!({"type":"faulted","reason":"core_crash"}));
+            return Ok(());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2407,6 +3455,18 @@ mod tests {
         assert!(!migrated.contains("real-password"));
         assert!(!migrated.contains("real-socks-password"));
 
+        fs::remove_file(temp_path).unwrap();
+    }
+
+    #[test]
+    fn desktop_state_loader_accepts_utf8_bom() {
+        let temp_path =
+            std::env::temp_dir().join(format!("poh-desktop-state-bom-{}.json", std::process::id()));
+        fs::write(&temp_path, "\u{feff}{\"Profiles\":[]}").unwrap();
+
+        let state = load_desktop_state(&temp_path).unwrap();
+
+        assert!(state.profiles.is_empty());
         fs::remove_file(temp_path).unwrap();
     }
 
@@ -2595,11 +3655,383 @@ mod tests {
         assert_eq!(config.proxy_override, "localhost;127.*");
     }
 
+    // ── C5: routing mode drives system-proxy materialization ─────────────────
+
+    fn naiveproxy_profile_for_mode_tests() -> DesktopProfile {
+        let adapter = NaiveProxyAdapter::new();
+        let parsed = adapter
+            .parse_profile(&ImportInput::text("https://user:pass@example.com:8443"))
+            .unwrap();
+        let (profile, _secrets) =
+            desktop_profile_from_import("naive-mode".to_string(), parsed).unwrap();
+        profile
+    }
+
+    #[test]
+    fn routing_mode_kind_parses_known_strings() {
+        assert_eq!(RoutingModeKind::parse("tun"), Some(RoutingModeKind::Tun));
+        assert_eq!(
+            RoutingModeKind::parse("system_proxy"),
+            Some(RoutingModeKind::SystemProxy)
+        );
+        assert_eq!(
+            RoutingModeKind::parse("local_proxy_gate"),
+            Some(RoutingModeKind::LocalProxyGate)
+        );
+        assert_eq!(RoutingModeKind::parse("bogus"), None);
+    }
+
+    #[test]
+    fn system_proxy_mode_applies_proxy_even_without_legacy_flag() {
+        // Legacy listener flag left at its default (disabled): the explicit mode
+        // must still turn the system proxy on, pointed at the local listener.
+        let profile = naiveproxy_profile_for_mode_tests();
+        assert!(!profile.listener.system_proxy.enabled);
+
+        let config = resolve_system_proxy_config(&profile, Some(RoutingModeKind::SystemProxy))
+            .unwrap()
+            .expect("system_proxy mode must produce a system proxy config");
+        assert_eq!(config.proxy_server, "socks=127.0.0.1:1080");
+    }
+
+    #[test]
+    fn local_proxy_gate_mode_never_applies_proxy() {
+        // Even with the legacy flag enabled, local_proxy_gate must not touch the
+        // OS proxy (the user picked a non-system transport).
+        let mut profile = naiveproxy_profile_for_mode_tests();
+        profile.listener.system_proxy = DesktopSystemProxy {
+            enabled: true,
+            mode: 0,
+            proxy_override: String::new(),
+        };
+
+        let config =
+            resolve_system_proxy_config(&profile, Some(RoutingModeKind::LocalProxyGate)).unwrap();
+        assert!(
+            config.is_none(),
+            "local_proxy_gate must not set a system proxy"
+        );
+    }
+
+    #[test]
+    fn tun_mode_never_applies_system_proxy() {
+        let mut profile = naiveproxy_profile_for_mode_tests();
+        profile.listener.system_proxy = DesktopSystemProxy {
+            enabled: true,
+            mode: 0,
+            proxy_override: String::new(),
+        };
+
+        let config = resolve_system_proxy_config(&profile, Some(RoutingModeKind::Tun)).unwrap();
+        assert!(config.is_none(), "tun mode must not set a system proxy");
+    }
+
+    #[test]
+    fn no_mode_falls_back_to_legacy_listener_flag() {
+        let mut profile = naiveproxy_profile_for_mode_tests();
+        // Disabled flag + no explicit mode -> no system proxy (legacy behaviour).
+        assert!(resolve_system_proxy_config(&profile, None)
+            .unwrap()
+            .is_none());
+        // Enabled flag + no explicit mode -> system proxy (legacy behaviour).
+        profile.listener.system_proxy = DesktopSystemProxy {
+            enabled: true,
+            mode: 0,
+            proxy_override: String::new(),
+        };
+        assert!(resolve_system_proxy_config(&profile, None)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn validate_active_mode_rejects_tun_for_naiveproxy() {
+        let error = validate_active_mode("naiveproxy", "tun").unwrap_err();
+        assert!(matches!(
+            error,
+            DesktopStateError::RoutingModeUnavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_active_mode_accepts_supported_modes() {
+        validate_active_mode("naiveproxy", "system_proxy").unwrap();
+        validate_active_mode("naiveproxy", "local_proxy_gate").unwrap();
+        validate_active_mode("trusttunnel", "tun").unwrap();
+    }
+
     #[test]
     fn secret_protection_roundtrips_without_plaintext() {
         let protected = protect_secret("very-secret-value").unwrap();
 
         assert!(!protected.contains("very-secret-value"));
         assert_eq!(unprotect_secret(&protected).unwrap(), "very-secret-value");
+    }
+
+    // ── C1: list_desktop_profiles ────────────────────────────────────────
+
+    #[test]
+    fn list_profiles_returns_trusttunnel_and_naiveproxy_with_correct_core_id() {
+        let tt_profile = DesktopProfile {
+            id: "tt-1".to_string(),
+            display_name: "My TT".to_string(),
+            core_id: "trusttunnel".to_string(),
+            endpoint: DesktopEndpoint {
+                hostname: "tt.example.com".to_string(),
+                upstream_protocol: 0,
+                ..DesktopEndpoint::default()
+            },
+            listener: DesktopListener {
+                mode: 0,
+                ..DesktopListener::default()
+            },
+            ..DesktopProfile::default()
+        };
+
+        let adapter = NaiveProxyAdapter::new();
+        let parsed = adapter
+            .parse_profile(&ImportInput::text(
+                "https://user:pass@naive.example.com:8443",
+            ))
+            .unwrap();
+        let (naive_profile, _) =
+            desktop_profile_from_import("naive-1".to_string(), parsed).unwrap();
+
+        let state = DesktopState {
+            profiles: vec![tt_profile, naive_profile],
+            ..DesktopState::default()
+        };
+
+        let summaries: Vec<DesktopProfileSummary> =
+            state.profiles.into_iter().map(profile_summary).collect();
+
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].core_id, "trusttunnel");
+        assert_eq!(summaries[0].host, "tt.example.com");
+        assert!(summaries[0].summary.contains("HTTP/2"));
+        assert_eq!(summaries[1].core_id, "naiveproxy");
+        assert_eq!(summaries[1].host, "naive.example.com");
+        assert!(summaries[1].summary.contains("HTTPS"));
+    }
+
+    #[test]
+    fn list_profiles_infers_trusttunnel_core_id_for_legacy_profiles() {
+        let legacy = DesktopProfile {
+            id: "legacy-1".to_string(),
+            display_name: String::new(),
+            core_id: String::new(), // empty = pre-CoreId era
+            endpoint: DesktopEndpoint {
+                hostname: "legacy.example.com".to_string(),
+                ..DesktopEndpoint::default()
+            },
+            ..DesktopProfile::default()
+        };
+        let summary = profile_summary(legacy);
+        assert_eq!(summary.core_id, "trusttunnel");
+        assert_eq!(summary.host, "legacy.example.com");
+        assert_eq!(summary.name, "legacy.example.com");
+    }
+
+    // ── C2: generic import path ──────────────────────────────────────────
+
+    #[test]
+    fn naiveproxy_import_uses_generic_core_path() {
+        let adapter = NaiveProxyAdapter::new();
+        let parsed = adapter
+            .parse_profile(&ImportInput::text("https://user:pass@np.example.com:8443"))
+            .unwrap();
+        let (profile, _secrets) = desktop_profile_from_import("np-1".to_string(), parsed).unwrap();
+
+        // Generic path: CoreId + CoreConfig set, not the TT Endpoint fields
+        assert_eq!(profile.core_id, "naiveproxy");
+        assert!(profile.core_config.is_some());
+        assert!(
+            profile.endpoint.hostname.is_empty(),
+            "generic profile must not populate legacy TT Endpoint"
+        );
+    }
+
+    // ── C3: core_schema ──────────────────────────────────────────────────
+
+    #[test]
+    fn core_schema_trusttunnel_has_endpoint_and_listener_sections() {
+        let schema = core_schema("trusttunnel").unwrap();
+        assert_eq!(schema.core_id, "trusttunnel");
+        assert!(!schema.sections.is_empty());
+        assert!(schema.sections.iter().any(|s| s.key == "endpoint"));
+        assert!(schema.sections.iter().any(|s| s.key == "listener"));
+        let endpoint = schema
+            .sections
+            .iter()
+            .find(|s| s.key == "endpoint")
+            .unwrap();
+        assert!(endpoint.fields.iter().any(|f| f.key == "password"));
+    }
+
+    #[test]
+    fn core_schema_naiveproxy_has_proxy_and_listen_sections() {
+        let schema = core_schema("naiveproxy").unwrap();
+        assert_eq!(schema.core_id, "naiveproxy");
+        assert!(schema.sections.iter().any(|s| s.key == "proxy"));
+        assert!(schema.sections.iter().any(|s| s.key == "listen"));
+    }
+
+    #[test]
+    fn core_schema_unknown_core_returns_error() {
+        assert!(core_schema("foobar").is_err());
+    }
+
+    // ── C5: core_modes ───────────────────────────────────────────────────
+
+    #[test]
+    fn core_modes_trusttunnel_has_tun_available() {
+        let modes = core_modes("trusttunnel").unwrap();
+        assert_eq!(modes.core_id, "trusttunnel");
+        assert!(modes.available.contains(&"tun".to_string()));
+        assert!(modes.available.contains(&"system_proxy".to_string()));
+        assert!(modes.available.contains(&"local_proxy_gate".to_string()));
+        assert!(modes.disabled.is_empty());
+        assert_eq!(modes.default, "tun");
+    }
+
+    #[test]
+    fn core_modes_naiveproxy_has_no_tun() {
+        let modes = core_modes("naiveproxy").unwrap();
+        assert!(!modes.available.contains(&"tun".to_string()));
+        assert!(modes.available.contains(&"system_proxy".to_string()));
+        assert!(modes.available.contains(&"local_proxy_gate".to_string()));
+        let tun_disabled = modes.disabled.iter().find(|d| d.mode == "tun");
+        assert!(tun_disabled.is_some());
+        assert_ne!(modes.default, "tun");
+    }
+
+    #[test]
+    fn core_modes_unknown_core_returns_error() {
+        assert!(core_modes("foobar").is_err());
+    }
+
+    // ── C4: validate_desktop_profile ─────────────────────────────────────
+
+    #[test]
+    fn validate_naive_profile_valid_fields_returns_ok() {
+        use std::collections::BTreeMap;
+        let mut fields: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        fields.insert("proxy.scheme".into(), serde_json::json!("https"));
+        fields.insert("proxy.host".into(), serde_json::json!("example.com"));
+        fields.insert("proxy.port".into(), serde_json::json!(8443));
+        fields.insert("listen.scheme".into(), serde_json::json!("socks"));
+        fields.insert("listen.host".into(), serde_json::json!("127.0.0.1"));
+        fields.insert("listen.port".into(), serde_json::json!(1080));
+
+        let input = ProfileFieldsInput {
+            core_id: "naiveproxy".to_string(),
+            profile_id: None,
+            display_name: None,
+            fields,
+        };
+
+        let tmp = std::env::temp_dir().join("poh_test_state_validate.json");
+        let result = validate_desktop_profile(&tmp, input).unwrap();
+        assert!(result.ok);
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn validate_naive_profile_missing_proxy_host_returns_not_ok() {
+        use std::collections::BTreeMap;
+        let mut fields: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        fields.insert("proxy.scheme".into(), serde_json::json!("https"));
+        fields.insert("proxy.host".into(), serde_json::json!(""));
+        fields.insert("listen.scheme".into(), serde_json::json!("socks"));
+        fields.insert("listen.host".into(), serde_json::json!("127.0.0.1"));
+
+        let input = ProfileFieldsInput {
+            core_id: "naiveproxy".to_string(),
+            profile_id: None,
+            display_name: None,
+            fields,
+        };
+
+        let tmp = std::env::temp_dir().join("poh_test_state_validate.json");
+        let result = validate_desktop_profile(&tmp, input).unwrap();
+        assert!(!result.ok);
+        assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn validate_naive_profile_password_not_in_core_config() {
+        use std::collections::BTreeMap;
+        let mut fields: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        fields.insert("proxy.scheme".into(), serde_json::json!("https"));
+        fields.insert("proxy.host".into(), serde_json::json!("example.com"));
+        fields.insert("proxy.password".into(), serde_json::json!("s3cr3t"));
+        fields.insert("listen.scheme".into(), serde_json::json!("socks"));
+        fields.insert("listen.host".into(), serde_json::json!("127.0.0.1"));
+
+        let mut raw_secrets: BTreeMap<String, String> = BTreeMap::new();
+        let core_config = naive_fields_to_core_config_saving(&fields, "test:1", &mut raw_secrets);
+
+        // Password must NOT appear in core_config
+        let core_config_str = serde_json::to_string(&core_config).unwrap();
+        assert!(
+            !core_config_str.contains("s3cr3t"),
+            "password leaked into core_config"
+        );
+
+        // Must appear in secrets map
+        assert!(
+            raw_secrets.values().any(|v| v == "s3cr3t"),
+            "password must be in secrets"
+        );
+    }
+
+    // ── C6: RoutePreset round-trip ────────────────────────────────────────
+
+    #[test]
+    fn route_preset_roundtrips_in_desktop_state() {
+        let preset = RoutePreset {
+            id: "all-proxy".to_string(),
+            name: "Все в прокси".to_string(),
+            rules: RoutePresetRules {
+                included_cidrs: "0.0.0.0/0".to_string(),
+                ..RoutePresetRules::default()
+            },
+        };
+
+        let mut state = DesktopState::default();
+        state
+            .route_presets_by_core
+            .insert("trusttunnel".to_string(), vec![preset.clone()]);
+        state
+            .active_route_by_core
+            .insert("trusttunnel".to_string(), "all-proxy".to_string());
+        state
+            .active_mode_by_core
+            .insert("trusttunnel".to_string(), "tun".to_string());
+
+        let json = serde_json::to_string(&state).unwrap();
+        let decoded: DesktopState = serde_json::from_str(&json).unwrap();
+
+        let presets = decoded.route_presets_by_core.get("trusttunnel").unwrap();
+        assert_eq!(presets.len(), 1);
+        assert_eq!(presets[0].id, "all-proxy");
+        assert_eq!(presets[0].rules.included_cidrs, "0.0.0.0/0");
+        assert_eq!(
+            decoded.active_route_by_core.get("trusttunnel").unwrap(),
+            "all-proxy"
+        );
+        assert_eq!(
+            decoded.active_mode_by_core.get("trusttunnel").unwrap(),
+            "tun"
+        );
+    }
+
+    #[test]
+    fn desktop_state_without_route_presets_deserializes_with_defaults() {
+        let json = r#"{"Profiles":[],"ProtectedSecrets":{}}"#;
+        let state: DesktopState = serde_json::from_str(json).unwrap();
+        assert!(state.route_presets_by_core.is_empty());
+        assert!(state.active_route_by_core.is_empty());
+        assert!(state.active_mode_by_core.is_empty());
     }
 }

@@ -393,7 +393,7 @@ fn parse_config_json(content: &str) -> Result<NaiveImport, AdapterError> {
     let object = value.as_object().ok_or_else(|| {
         AdapterError::Import("NaiveProxy config must be a JSON object".to_string())
     })?;
-    let listen = string_field(object, "listen")?;
+    let listen = string_or_first_string_field(object, "listen")?;
     let proxy = string_field(object, "proxy")?;
     let (listen, listen_password) = parse_endpoint_url(
         listen,
@@ -511,7 +511,10 @@ fn json_contains_listen_and_proxy(content: &str) -> bool {
         .ok()
         .and_then(|value| {
             let object = value.as_object()?;
-            Some(object.get("listen")?.is_string() && object.get("proxy")?.is_string())
+            let listen_supported = object
+                .get("listen")
+                .is_some_and(|value| value.is_string() || first_string(value).is_some());
+            Some(listen_supported && object.get("proxy")?.is_string())
         })
         .unwrap_or(false)
 }
@@ -529,6 +532,27 @@ fn string_field<'a>(object: &'a Map<String, Value>, key: &str) -> Result<&'a str
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| AdapterError::Import(format!("{key} must be a string")))
+}
+
+fn string_or_first_string_field<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, AdapterError> {
+    let value = object
+        .get(key)
+        .ok_or_else(|| AdapterError::Import(format!("{key} is required")))?;
+    value
+        .as_str()
+        .or_else(|| first_string(value))
+        .ok_or_else(|| AdapterError::Import(format!("{key} must be a string or string array")))
+}
+
+fn first_string(value: &Value) -> Option<&str> {
+    value
+        .as_array()?
+        .iter()
+        .find_map(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn optional_string_field(object: &Map<String, Value>, key: &str) -> String {
@@ -726,6 +750,29 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.field == "insecure_concurrency"));
+    }
+
+    #[test]
+    fn parses_config_json_with_listen_array() {
+        let adapter = NaiveProxyAdapter::new();
+        let parsed = adapter
+            .parse_profile(&ImportInput::text(
+                r#"{
+                  "listen": ["socks://127.0.0.1:1081"],
+                  "proxy": "https://user:p%40ss%3Aword@example.com:443"
+                }"#,
+            ))
+            .expect("config with listen array should parse");
+        let core_profile =
+            serde_json::from_value::<NaiveProxyCoreProfile>(parsed.profile.core_config).unwrap();
+
+        assert_eq!(core_profile.config.listen.scheme, "socks");
+        assert_eq!(core_profile.config.listen.host, "127.0.0.1");
+        assert_eq!(core_profile.config.listen.port, Some(1081));
+        assert_eq!(
+            parsed.secrets.get(PROXY_PASSWORD_KEY),
+            Some(&"p%40ss%3Aword".to_string())
+        );
     }
 
     #[test]

@@ -12,3 +12,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 ureq.workspace = true
 zip.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_Security_WinTrust",
+] }

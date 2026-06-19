@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read};
@@ -16,6 +17,7 @@ use poh_core::{
 use poh_core_runner::{MapSecretResolver, RuntimeMaterializer};
 use poh_core_session::{CoreLaunchDescriptor, CoreLaunchSpec, CoreProcess};
 use poh_core_store::{CoreArtifact, CoreDownloader, CoreInstallRequest, CoreStore};
+use serde::Serialize;
 
 const MAX_DESKTOP_IMPORT_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -69,6 +71,7 @@ fn main() -> ExitCode {
             }
         }
         Some("core-list-installed") => core_list_installed(),
+        Some("catalog-list") => catalog_list(),
         Some("core-download-plan") => core_download_plan(&args[1..]),
         Some("core-install") => core_install(&args[1..]),
         Some("runtime-smoke") => runtime_smoke(),
@@ -82,10 +85,16 @@ fn main() -> ExitCode {
         Some("desktop-session-reset") => desktop_session_reset(),
         Some("desktop-session-status") => desktop_session_status(),
         Some("desktop-session-log") => desktop_session_log(),
+        Some("desktop-session-supervise") => desktop_session_supervise(&args[1..]),
+        Some("desktop-list-profiles") => desktop_list_profiles(&args[1..]),
+        Some("desktop-core-schema") => desktop_core_schema(&args[1..]),
+        Some("desktop-core-modes") => desktop_core_modes(&args[1..]),
+        Some("desktop-validate-profile") => desktop_validate_profile(&args[1..]),
+        Some("desktop-update-profile") => desktop_update_profile(&args[1..]),
         Some(command) => {
             eprintln!("Unknown command: {command}");
             eprintln!(
-                "Usage: poh_cli [list|sources|core-list-installed|core-download-plan <core-id>|core-install <core-id> [executable-relative-path]|runtime-smoke|store-smoke|session-smoke|desktop-preview-profile <input-text-file|->|desktop-import-profile <input-text-file|->|desktop-session-plan <state-path> <profile-id>|desktop-session-start <state-path> <profile-id>|desktop-session-stop|desktop-session-reset|desktop-session-status|desktop-session-log|detect <profile text>]"
+                "Usage: poh_cli [list|sources|catalog-list|core-list-installed|core-download-plan <core-id>|core-install <core-id> [executable-relative-path]|runtime-smoke|store-smoke|session-smoke|desktop-preview-profile <input-text-file|->|desktop-import-profile <input-text-file|->|desktop-session-plan <state-path> <profile-id>|desktop-session-start <state-path> <profile-id>|desktop-session-stop|desktop-session-reset|desktop-session-status|desktop-session-log|desktop-session-supervise <state-path> <profile-id>|detect <profile text>]"
             );
             ExitCode::from(2)
         }
@@ -220,6 +229,102 @@ fn core_list_installed() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+#[derive(Serialize)]
+struct CoreCatalogResponse {
+    cores: Vec<CoreCatalogEntry>,
+}
+
+#[derive(Serialize)]
+struct CoreCatalogEntry {
+    core_id: CoreId,
+    display_name: String,
+    source_type: SourceType,
+    source_status: SourceStatus,
+    install_enabled: bool,
+    installable: bool,
+    installed: bool,
+    active_version: Option<String>,
+    installed_versions: Vec<String>,
+    active_executable_path: Option<String>,
+    descriptor_available: bool,
+    executable_relative_path: Option<String>,
+    pinned_release: Option<PinnedRelease>,
+    homepage: Option<String>,
+    license: Option<String>,
+    notes: Option<String>,
+    signature_preferred: bool,
+}
+
+fn catalog_list() -> ExitCode {
+    let sources = match load_trusted_sources() {
+        Ok(sources) => sources,
+        Err(error) => {
+            eprintln!("Trusted source policy failed: {error}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let store = CoreStore::new(local_core_store_root());
+    let installed = match store.list_installed() {
+        Ok(installed) => installed,
+        Err(error) => {
+            eprintln!("Core catalog failed to read installed cores: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut installed_by_core = BTreeMap::<CoreId, Vec<_>>::new();
+    for core in installed {
+        installed_by_core
+            .entry(core.manifest.core_id.clone())
+            .or_default()
+            .push(core);
+    }
+
+    let cores = sources
+        .into_iter()
+        .map(|source| {
+            let installed = installed_by_core
+                .remove(&source.core_id)
+                .unwrap_or_default();
+            let active = installed.iter().find(|core| core.active);
+            let descriptor = CoreLaunchDescriptor::for_core(&source.core_id);
+            let installable = source.is_installable();
+
+            CoreCatalogEntry {
+                core_id: source.core_id,
+                display_name: source.display_name,
+                source_type: source.source_type,
+                source_status: source.status.clone(),
+                install_enabled: source.install_enabled,
+                installable,
+                installed: !installed.is_empty(),
+                active_version: active.map(|core| core.manifest.version.clone()),
+                installed_versions: installed
+                    .iter()
+                    .map(|core| core.manifest.version.clone())
+                    .collect(),
+                active_executable_path: active
+                    .map(|core| core.executable_path.display().to_string()),
+                descriptor_available: descriptor.is_some(),
+                executable_relative_path: descriptor
+                    .map(|descriptor| descriptor.executable_relative_path),
+                pinned_release: source.pinned_release,
+                homepage: source.homepage,
+                license: source.license,
+                notes: source.notes,
+                signature_preferred: source.signature_preferred,
+            }
+        })
+        .collect();
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&CoreCatalogResponse { cores })
+            .expect("core catalog should serialize")
+    );
+    ExitCode::SUCCESS
 }
 
 fn core_download_plan(args: &[String]) -> ExitCode {
@@ -604,6 +709,176 @@ fn desktop_session_log() -> ExitCode {
         }
     }
 }
+
+fn desktop_session_supervise(args: &[String]) -> ExitCode {
+    let (state_path, profile_id) = match args {
+        [s, p] => (s.as_str(), p.as_str()),
+        _ => {
+            eprintln!("Usage: poh_cli desktop-session-supervise <state-path> <profile-id>");
+            return ExitCode::from(2);
+        }
+    };
+    match desktop_state::supervise_desktop_session(std::path::Path::new(state_path), profile_id) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Supervisor error: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+// ── C1: desktop-list-profiles ─────────────────────────────────────────────
+
+fn desktop_list_profiles(args: &[String]) -> ExitCode {
+    let state_path = match args.first() {
+        Some(p) => std::path::Path::new(p.as_str()),
+        None => {
+            eprintln!("Usage: poh_cli desktop-list-profiles <state-path>");
+            return ExitCode::from(2);
+        }
+    };
+    match desktop_state::list_desktop_profiles(state_path) {
+        Ok(list) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&list).expect("serialize")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            println!("{}", serde_json::json!({ "error": error.to_string() }));
+            ExitCode::from(1)
+        }
+    }
+}
+
+// ── C3: desktop-core-schema ───────────────────────────────────────────────
+
+fn desktop_core_schema(args: &[String]) -> ExitCode {
+    let core_id = match args.first() {
+        Some(id) => id.as_str(),
+        None => {
+            eprintln!("Usage: poh_cli desktop-core-schema <core-id>");
+            return ExitCode::from(2);
+        }
+    };
+    match desktop_state::core_schema(core_id) {
+        Ok(schema) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&schema).expect("serialize")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            println!("{}", serde_json::json!({ "error": error.to_string() }));
+            ExitCode::from(1)
+        }
+    }
+}
+
+// ── C5: desktop-core-modes ────────────────────────────────────────────────
+
+fn desktop_core_modes(args: &[String]) -> ExitCode {
+    let core_id = match args.first() {
+        Some(id) => id.as_str(),
+        None => {
+            eprintln!("Usage: poh_cli desktop-core-modes <core-id>");
+            return ExitCode::from(2);
+        }
+    };
+    match desktop_state::core_modes(core_id) {
+        Ok(modes) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&modes).expect("serialize")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            println!("{}", serde_json::json!({ "error": error.to_string() }));
+            ExitCode::from(1)
+        }
+    }
+}
+
+// ── C4: desktop-validate-profile / desktop-update-profile ────────────────
+
+fn read_stdin_json<T: serde::de::DeserializeOwned>(cmd: &str) -> Result<T, ExitCode> {
+    let mut buf = String::new();
+    if io::stdin().read_to_string(&mut buf).is_err() {
+        eprintln!("{cmd}: failed to read stdin");
+        return Err(ExitCode::from(2));
+    }
+    serde_json::from_str::<T>(&buf).map_err(|error| {
+        println!(
+            "{}",
+            serde_json::json!({ "error": format!("bad JSON: {error}") })
+        );
+        ExitCode::from(1)
+    })
+}
+
+fn desktop_validate_profile(args: &[String]) -> ExitCode {
+    let state_path = match args.first() {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            eprintln!("Usage: poh_cli desktop-validate-profile <state-path>  (JSON on stdin)");
+            return ExitCode::from(2);
+        }
+    };
+    let input: desktop_state::ProfileFieldsInput = match read_stdin_json("desktop-validate-profile")
+    {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    match desktop_state::validate_desktop_profile(&state_path, input) {
+        Ok(result) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).expect("serialize")
+            );
+            if result.ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(error) => {
+            println!("{}", serde_json::json!({ "error": error.to_string() }));
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn desktop_update_profile(args: &[String]) -> ExitCode {
+    let state_path = match args.first() {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            eprintln!("Usage: poh_cli desktop-update-profile <state-path>  (JSON on stdin)");
+            return ExitCode::from(2);
+        }
+    };
+    let input: desktop_state::ProfileFieldsInput = match read_stdin_json("desktop-update-profile") {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    match desktop_state::update_desktop_profile(&state_path, input) {
+        Ok(result) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).expect("serialize")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            println!("{}", serde_json::json!({ "error": error.to_string() }));
+            ExitCode::from(1)
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 fn smoke_sources_for(manifest: &InstalledCoreManifest) -> Vec<TrustedCoreSource> {
     vec![TrustedCoreSource {

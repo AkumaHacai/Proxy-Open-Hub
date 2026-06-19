@@ -181,7 +181,7 @@ impl CoreLaunchDescriptor {
             core_id: CoreId::from(core_id),
             executable_relative_path: executable_relative_path.to_string(),
             working_directory: CoreWorkingDirectory::InstallDir,
-            runtime_path_mode: RuntimePathMode::KeepRelative,
+            runtime_path_mode: RuntimePathMode::AbsoluteRuntimeDir,
             append_args: Vec::new(),
             log_file_name: None,
         }
@@ -641,6 +641,40 @@ mod tests {
             "trusttunnel_client.exe"
         );
         assert!(CoreLaunchDescriptor::for_core(&CoreId::from("unknown")).is_none());
+    }
+
+    #[test]
+    fn archive_descriptor_absolutizes_runtime_config_arguments() {
+        let core = verified_current_exe();
+        let runtime_dir = std::env::temp_dir().join(format!(
+            "poh-session-runtime-{}",
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let runtime = poh_core_runner::MaterializedRuntime {
+            files: vec![poh_core_runner::MaterializedFile {
+                relative_path: "config.json".to_string(),
+                content: "{}".to_string(),
+                sensitive: false,
+            }],
+            command_args: vec!["config.json".to_string()],
+            environment: BTreeMap::new(),
+        };
+        let descriptor = CoreLaunchDescriptor::for_core(&CoreId::from("naiveproxy")).unwrap();
+
+        let spec = descriptor
+            .build_spec(
+                core.executable_path,
+                core.install_dir.clone(),
+                &runtime_dir,
+                &runtime,
+            )
+            .unwrap();
+
+        assert_eq!(spec.working_dir, core.install_dir);
+        assert_eq!(
+            spec.args,
+            vec![runtime_dir.join("config.json").display().to_string()]
+        );
     }
 
     fn verified_current_exe() -> VerifiedCore {

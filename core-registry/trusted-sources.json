@@ -33,18 +33,23 @@
     "core_id": "naiveproxy",
     "display_name": "NaiveProxy",
     "source_type": "github_release",
-    "status": "planned",
+    "status": "active",
     "owner": "klzgrad",
     "repo": "naiveproxy",
     "homepage": "https://github.com/klzgrad/naiveproxy",
     "license": "BSD-3-Clause",
-    "install_enabled": false,
+    "install_enabled": true,
     "checksum_required": true,
-    "signature_preferred": true,
+    "signature_preferred": false,
     "allowed_asset_patterns": [
       "naiveproxy-*-win-x64.zip"
     ],
-    "notes": "Planned optional core. Settings appear only after installation."
+    "pinned_release": {
+      "version": "v149.0.7827.114-1",
+      "asset_name": "naiveproxy-v149.0.7827.114-1-win-x64.zip",
+      "sha256": "50f8138a1cfaeaf28866cb9f7ff25fbd92d2b3bd642885e95131f7d56ebf1086"
+    },
+    "notes": "First pinned release. naive.exe is the executable inside the zip."
   },
   {
     "core_id": "xray-core",
