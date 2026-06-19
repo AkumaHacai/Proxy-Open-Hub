@@ -14,7 +14,7 @@ class ThemeRevealWrapper extends StatefulWidget {
   });
 
   final PohThemeMode themeMode;
-  final PohAccent accent;
+  final Color accent;
   final Duration duration;
   final Widget Function(BuildContext context, PohThemeMode themeMode) builder;
 
@@ -28,7 +28,7 @@ class ThemeRevealWrapperState extends State<ThemeRevealWrapper>
   late final Animation<double> _radiusProgress;
   Offset? _origin;
   PohThemeMode? _revealedThemeMode;
-  PohAccent? _revealedAccent;
+  Color? _revealedAccent;
 
   @override
   void initState() {
@@ -59,7 +59,7 @@ class ThemeRevealWrapperState extends State<ThemeRevealWrapper>
 
   Future<void> revealTo({
     required PohThemeMode themeMode,
-    required PohAccent accent,
+    required Color accent,
     required Offset globalOrigin,
   }) async {
     final box = context.findRenderObject() as RenderBox?;
@@ -93,7 +93,7 @@ class ThemeRevealWrapperState extends State<ThemeRevealWrapper>
   Widget build(BuildContext context) {
     final activeTheme = buildPohTheme(
       mode: widget.themeMode,
-      accent: widget.accent,
+      accentColor: widget.accent,
     );
     final revealedThemeMode = _revealedThemeMode;
     final revealedAccent = _revealedAccent;
@@ -125,7 +125,7 @@ class ThemeRevealWrapperState extends State<ThemeRevealWrapper>
                     child: Theme(
                       data: buildPohTheme(
                         mode: revealedThemeMode,
-                        accent: revealedAccent,
+                        accentColor: revealedAccent,
                       ),
                       child: Builder(
                         builder: (revealedContext) {

@@ -22,6 +22,8 @@ class CoreSpec {
     required this.listener,
     required this.tagline,
     required this.status,
+    this.installable = false,
+    this.installing = false,
   });
 
   final String id;
@@ -32,12 +34,36 @@ class CoreSpec {
   final String listener;
   final String tagline;
   final CoreStatus status;
+  final bool installable;
+  final bool installing;
+
+  CoreSpec copyWith({
+    String? name,
+    String? tagline,
+    CoreStatus? status,
+    bool? installable,
+    bool? installing,
+  }) {
+    return CoreSpec(
+      id: id,
+      name: name ?? this.name,
+      letter: letter,
+      accent: accent,
+      protocol: protocol,
+      listener: listener,
+      tagline: tagline ?? this.tagline,
+      status: status ?? this.status,
+      installable: installable ?? this.installable,
+      installing: installing ?? this.installing,
+    );
+  }
 }
 
 @immutable
 class ServerProfile {
   const ServerProfile({
     required this.id,
+    required this.coreId,
     required this.name,
     required this.host,
     required this.countryCode,
@@ -49,6 +75,7 @@ class ServerProfile {
   });
 
   final String id;
+  final String coreId;
   final String name;
   final String host;
   final String countryCode;
@@ -57,6 +84,27 @@ class ServerProfile {
   final String dns;
   final double load;
   final bool tlsVerificationDisabled;
+
+  static ServerProfile fromCliJson(Map<String, dynamic> json) {
+    final id = json['id']?.toString() ?? '';
+    final coreId = _normalizeCoreId(json['core_id']?.toString());
+    final host = json['host']?.toString() ?? '';
+    final name = json['name']?.toString() ?? '';
+    final summary = json['summary']?.toString() ?? '';
+
+    return ServerProfile(
+      id: id,
+      coreId: coreId,
+      name: name.isNotEmpty ? name : host,
+      host: host,
+      countryCode: '--',
+      city: '',
+      pingMs: 0,
+      dns: summary.isNotEmpty ? summary : _protocolForCore(coreId),
+      load: 0,
+      tlsVerificationDisabled: false,
+    );
+  }
 
   static ServerProfile fromDesktopStateJson(Map<String, dynamic> json) {
     final endpoint = (json['Endpoint'] as Map?)?.cast<String, dynamic>() ?? {};
@@ -77,9 +125,10 @@ class ServerProfile {
 
     return ServerProfile(
       id: json['Id']?.toString() ?? hostname,
+      coreId: _normalizeCoreId(json['CoreId']?.toString()),
       name: displayName.isNotEmpty ? displayName : hostname,
       host: hostname,
-      countryCode: countryCode.isNotEmpty ? countryCode : 'TT',
+      countryCode: countryCode.isNotEmpty ? countryCode : '--',
       city: json['CountryName']?.toString() ?? '',
       pingMs: ping,
       dns: '$protocol - $listenerMode',
@@ -87,6 +136,21 @@ class ServerProfile {
       tlsVerificationDisabled: tlsVerificationDisabled,
     );
   }
+}
+
+String _normalizeCoreId(String? value) {
+  final normalized = value?.trim().toLowerCase() ?? '';
+  return normalized.isEmpty ? 'trusttunnel' : normalized;
+}
+
+String _protocolForCore(String coreId) {
+  for (final core in coreSpecs) {
+    if (core.id == coreId) {
+      return core.protocol;
+    }
+  }
+
+  return 'Proxy';
 }
 
 @immutable
@@ -176,6 +240,13 @@ const coreSpecs = <CoreSpec>[
 
 CoreSpec findCore(String id) {
   return coreSpecs.firstWhere((core) => core.id == id);
+}
+
+CoreSpec findCoreIn(Iterable<CoreSpec> cores, String id) {
+  return cores.firstWhere(
+    (core) => core.id == id,
+    orElse: () => findCore(id),
+  );
 }
 
 String phaseLabel(ConnectionPhase phase) {

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/backend_session_service.dart';
+import '../services/window_controls.dart';
 import '../theme/poh_theme.dart';
 
 class LogsShell extends StatefulWidget {
@@ -24,7 +25,7 @@ class _LogsShellState extends State<LogsShell> {
   @override
   void initState() {
     super.initState();
-    _future = widget.sessionService.trustTunnelSessionLog();
+    _future = widget.sessionService.sessionLog();
   }
 
   @override
@@ -119,7 +120,7 @@ class _LogsShellState extends State<LogsShell> {
           _LogsFooter(
             onRefresh: () {
               setState(() {
-                _future = widget.sessionService.trustTunnelSessionLog();
+                _future = widget.sessionService.sessionLog();
               });
             },
             onCopy: () async {
@@ -135,14 +136,12 @@ class _LogsShellState extends State<LogsShell> {
 
   static String _subtitle(BackendSessionLog? log) {
     if (log == null) {
-      return 'Reading TrustTunnel runtime log.';
+      return 'Reading core runtime log.';
     }
 
     final path = log.logPath;
     if (path == null || path.isEmpty) {
-      return log.running
-          ? 'Core is running.'
-          : 'No active TrustTunnel session.';
+      return log.running ? 'Core is running.' : 'No active core session.';
     }
 
     return '${log.running ? "Active" : "Stopped"} session log: $path';
@@ -157,56 +156,60 @@ class _LogsTitleBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
-    return Container(
-      height: 52,
-      padding: const EdgeInsets.symmetric(horizontal: 18),
-      decoration: BoxDecoration(
-        color: palette.surface,
-        border: Border(bottom: BorderSide(color: palette.border)),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 26,
-            height: 26,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: palette.accent,
-              borderRadius: BorderRadius.circular(9),
-              boxShadow: [
-                BoxShadow(
-                  color: palette.accentSoft,
-                  spreadRadius: 4,
-                  blurRadius: 0,
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onPanStart: (_) => WindowControls.startDrag(),
+      child: Container(
+        height: 52,
+        padding: const EdgeInsets.symmetric(horizontal: 18),
+        decoration: BoxDecoration(
+          color: palette.surface,
+          border: Border(bottom: BorderSide(color: palette.border)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 26,
+              height: 26,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: palette.accent,
+                borderRadius: BorderRadius.circular(9),
+                boxShadow: [
+                  BoxShadow(
+                    color: palette.accentSoft,
+                    spreadRadius: 4,
+                    blurRadius: 0,
+                  ),
+                ],
+              ),
+              child: const Text(
+                'T',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
                 ),
-              ],
+              ),
             ),
-            child: const Text(
-              'T',
+            const SizedBox(width: 11),
+            Text(
+              'Core logs',
               style: TextStyle(
-                color: Colors.white,
+                color: palette.text,
+                fontSize: 15,
                 fontWeight: FontWeight.w900,
               ),
             ),
-          ),
-          const SizedBox(width: 11),
-          Text(
-            'TrustTunnel logs',
-            style: TextStyle(
-              color: palette.text,
-              fontSize: 15,
-              fontWeight: FontWeight.w900,
+            const Spacer(),
+            IconButton(
+              tooltip: 'Close',
+              visualDensity: VisualDensity.compact,
+              color: palette.muted,
+              onPressed: onClose,
+              icon: const Icon(Icons.close_rounded, size: 18),
             ),
-          ),
-          const Spacer(),
-          IconButton(
-            tooltip: 'Close',
-            visualDensity: VisualDensity.compact,
-            color: palette.muted,
-            onPressed: onClose,
-            icon: const Icon(Icons.close_rounded, size: 18),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

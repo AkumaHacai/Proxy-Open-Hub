@@ -14,16 +14,22 @@ class DesktopStateLoader {
 
     try {
       final json = jsonDecode(await file.readAsString());
-      final profiles = (json as Map<String, dynamic>)['Profiles'];
-      if (profiles is! List) {
+      final state = json as Map<String, dynamic>;
+      final legacyProfiles = state['Profiles'];
+      final contractProfiles = state['profiles'];
+      final profiles = <ServerProfile>[
+        if (legacyProfiles is List)
+          for (final profile in legacyProfiles.whereType<Map>())
+            ServerProfile.fromDesktopStateJson(profile.cast<String, dynamic>()),
+        if (contractProfiles is List)
+          for (final profile in contractProfiles.whereType<Map>())
+            ServerProfile.fromCliJson(profile.cast<String, dynamic>()),
+      ];
+      if (profiles.isEmpty) {
         return const [];
       }
 
       return profiles
-          .whereType<Map>()
-          .map((profile) => ServerProfile.fromDesktopStateJson(
-                profile.cast<String, dynamic>(),
-              ))
           .where((profile) => profile.host.isNotEmpty)
           .toList(growable: false);
     } on FormatException {

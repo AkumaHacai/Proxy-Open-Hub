@@ -1,18 +1,24 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../models/app_models.dart';
 import '../services/backend_session_service.dart';
+import '../services/window_controls.dart';
 import '../theme/poh_theme.dart';
 
 class ImportProfileShell extends StatefulWidget {
   const ImportProfileShell({
     super.key,
     required this.sessionService,
+    required this.cores,
+    required this.activeCoreId,
     required this.onImported,
     this.onClose,
   });
 
   final BackendSessionService sessionService;
+  final List<CoreSpec> cores;
+  final String activeCoreId;
   final ValueChanged<BackendImportResult> onImported;
   final VoidCallback? onClose;
 
@@ -23,8 +29,32 @@ class ImportProfileShell extends StatefulWidget {
 class _ImportProfileShellState extends State<ImportProfileShell> {
   final _controller = TextEditingController();
   var _busy = false;
+  late var _selectedCoreId = widget.activeCoreId;
+  var _coreChangedByUser = false;
   String? _message;
   String? _error;
+
+  @override
+  void didUpdateWidget(covariant ImportProfileShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!_coreChangedByUser && oldWidget.activeCoreId != widget.activeCoreId) {
+      _selectedCoreId = widget.activeCoreId;
+    }
+  }
+
+  CoreSpec? get _selectedCore {
+    if (_selectedCoreId == 'auto') {
+      return null;
+    }
+
+    for (final core in widget.cores) {
+      if (core.id == _selectedCoreId) {
+        return core;
+      }
+    }
+
+    return null;
+  }
 
   @override
   void dispose() {
@@ -53,7 +83,11 @@ class _ImportProfileShellState extends State<ImportProfileShell> {
       ),
       child: Column(
         children: [
-          _ImportTitleBar(onClose: widget.onClose),
+          _ImportTitleBar(
+            selectedCore: _selectedCore,
+            autoDetect: _selectedCoreId == 'auto',
+            onClose: widget.onClose,
+          ),
           Expanded(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(24, 22, 24, 18),
@@ -61,7 +95,9 @@ class _ImportProfileShellState extends State<ImportProfileShell> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Import TrustTunnel profile',
+                    _selectedCore == null
+                        ? 'Import server profile'
+                        : 'Import ${_selectedCore!.name} profile',
                     style: TextStyle(
                       color: palette.text,
                       fontSize: 26,
@@ -70,10 +106,23 @@ class _ImportProfileShellState extends State<ImportProfileShell> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    'Paste a tt:// link or a TrustTunnel TOML config. Secrets are protected by the Rust backend and risky fields are shown before save.',
+                    'Choose a target core, then paste a profile. Secrets are protected by the Rust backend and risky fields are shown before save.',
                     style: TextStyle(color: palette.muted, fontSize: 13),
                   ),
                   const SizedBox(height: 16),
+                  _CoreImportPicker(
+                    cores: widget.cores,
+                    selectedCoreId: _selectedCoreId,
+                    onChanged: (value) {
+                      setState(() {
+                        _selectedCoreId = value;
+                        _coreChangedByUser = true;
+                        _message = null;
+                        _error = null;
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 14),
                   Expanded(
                     child: TextField(
                       controller: _controller,
@@ -174,8 +223,10 @@ class _ImportProfileShellState extends State<ImportProfileShell> {
     });
 
     try {
-      final preview =
-          await widget.sessionService.previewTrustTunnelProfile(text);
+      final preview = await widget.sessionService.previewProfile(
+        coreId: _selectedCoreId,
+        input: text,
+      );
       if (!mounted) {
         return;
       }
@@ -197,7 +248,10 @@ class _ImportProfileShellState extends State<ImportProfileShell> {
         setState(() => _message = 'Importing profile...');
       }
 
-      final result = await widget.sessionService.importTrustTunnelProfile(text);
+      final result = await widget.sessionService.importProfile(
+        coreId: _selectedCoreId,
+        input: text,
+      );
       if (!mounted) {
         return;
       }
@@ -360,64 +414,162 @@ class _ImportProfileShellState extends State<ImportProfileShell> {
   }
 }
 
+class _CoreImportPicker extends StatelessWidget {
+  const _CoreImportPicker({
+    required this.cores,
+    required this.selectedCoreId,
+    required this.onChanged,
+  });
+
+  final List<CoreSpec> cores;
+  final String selectedCoreId;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = PohPalette.of(context);
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        _CoreImportChip(
+          label: 'Auto',
+          color: palette.accent,
+          selected: selectedCoreId == 'auto',
+          onPressed: () => onChanged('auto'),
+        ),
+        for (final core in cores)
+          _CoreImportChip(
+            label: core.name,
+            color: core.accent,
+            selected: selectedCoreId == core.id,
+            onPressed: () => onChanged(core.id),
+          ),
+      ],
+    );
+  }
+}
+
+class _CoreImportChip extends StatelessWidget {
+  const _CoreImportChip({
+    required this.label,
+    required this.color,
+    required this.selected,
+    required this.onPressed,
+  });
+
+  final String label;
+  final Color color;
+  final bool selected;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = PohPalette.of(context);
+    return Material(
+      color: selected ? color.withValues(alpha: 0.14) : palette.surface,
+      borderRadius: BorderRadius.circular(999),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: onPressed,
+        child: Container(
+          height: 32,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(
+              color: selected ? color.withValues(alpha: 0.55) : palette.border,
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? palette.text : palette.muted,
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _ImportTitleBar extends StatelessWidget {
-  const _ImportTitleBar({this.onClose});
+  const _ImportTitleBar({
+    required this.selectedCore,
+    required this.autoDetect,
+    this.onClose,
+  });
+
+  final CoreSpec? selectedCore;
+  final bool autoDetect;
 
   final VoidCallback? onClose;
 
   @override
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
-    return Container(
-      height: 52,
-      padding: const EdgeInsets.symmetric(horizontal: 18),
-      decoration: BoxDecoration(
-        color: palette.surface,
-        border: Border(bottom: BorderSide(color: palette.border)),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 26,
-            height: 26,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: palette.accent,
-              borderRadius: BorderRadius.circular(9),
-              boxShadow: [
-                BoxShadow(
-                  color: palette.accentSoft,
-                  spreadRadius: 4,
-                  blurRadius: 0,
+    final core = selectedCore;
+    final markerColor = core?.accent ?? palette.accent;
+    final markerLetter = autoDetect ? 'A' : core?.letter ?? '?';
+    final title =
+        autoDetect || core == null ? 'Add server' : 'Add ${core.name} server';
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onPanStart: (_) => WindowControls.startDrag(),
+      child: Container(
+        height: 52,
+        padding: const EdgeInsets.symmetric(horizontal: 18),
+        decoration: BoxDecoration(
+          color: palette.surface,
+          border: Border(bottom: BorderSide(color: palette.border)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 26,
+              height: 26,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: markerColor,
+                borderRadius: BorderRadius.circular(9),
+                boxShadow: [
+                  BoxShadow(
+                    color: markerColor.withValues(alpha: 0.22),
+                    spreadRadius: 4,
+                    blurRadius: 0,
+                  ),
+                ],
+              ),
+              child: Text(
+                markerLetter,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
                 ),
-              ],
+              ),
             ),
-            child: const Text(
-              'T',
+            const SizedBox(width: 11),
+            Text(
+              title,
               style: TextStyle(
-                color: Colors.white,
+                color: palette.text,
+                fontSize: 15,
                 fontWeight: FontWeight.w900,
               ),
             ),
-          ),
-          const SizedBox(width: 11),
-          Text(
-            'Add server',
-            style: TextStyle(
-              color: palette.text,
-              fontSize: 15,
-              fontWeight: FontWeight.w900,
+            const Spacer(),
+            IconButton(
+              tooltip: 'Close',
+              visualDensity: VisualDensity.compact,
+              color: palette.muted,
+              onPressed: onClose,
+              icon: const Icon(Icons.close_rounded, size: 18),
             ),
-          ),
-          const Spacer(),
-          IconButton(
-            tooltip: 'Close',
-            visualDensity: VisualDensity.compact,
-            color: palette.muted,
-            onPressed: onClose,
-            icon: const Icon(Icons.close_rounded, size: 18),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

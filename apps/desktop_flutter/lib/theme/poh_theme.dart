@@ -1,5 +1,28 @@
 import 'package:flutter/material.dart';
 
+/// Shared motion tokens, mirrored from the reference design
+/// (`width .34s cubic-bezier(.4,0,.2,1)`, theme `.3s ease`). Use these
+/// everywhere so the window resize and the in-window layout share one
+/// timing/curve and never drift apart (the "jumping" layout).
+class PohMotion {
+  const PohMotion._();
+
+  /// compact <-> expanded morph (window + layout).
+  static const Duration morph = Duration(milliseconds: 300);
+
+  /// theme / colour cross-fades.
+  static const Duration theme = Duration(milliseconds: 320);
+
+  /// hover / small affordances.
+  static const Duration quick = Duration(milliseconds: 150);
+
+  /// cubic-bezier(0.4, 0, 0.2, 1) == Flutter's fastOutSlowIn.
+  static const Curve standard = Curves.fastOutSlowIn;
+
+  /// entrance / fade-in.
+  static const Curve decel = Curves.easeOutCubic;
+}
+
 enum PohThemeMode { light, dark }
 
 extension PohThemeModeX on PohThemeMode {
@@ -59,8 +82,8 @@ class PohPalette extends ThemeExtension<PohPalette> {
     return Theme.of(context).extension<PohPalette>()!;
   }
 
-  static PohPalette light(PohAccent accent) {
-    final color = accent.color;
+  static PohPalette light(Color accent) {
+    final color = accent;
     return PohPalette(
       background: const Color(0xFFF6F7F5),
       surface: Colors.white,
@@ -78,8 +101,8 @@ class PohPalette extends ThemeExtension<PohPalette> {
     );
   }
 
-  static PohPalette dark(PohAccent accent) {
-    final color = accent.color;
+  static PohPalette dark(Color accent) {
+    final color = accent;
     return PohPalette(
       background: const Color(0xFF111412),
       surface: const Color(0xFF181B19),
@@ -156,11 +179,13 @@ class PohPalette extends ThemeExtension<PohPalette> {
 
 ThemeData buildPohTheme({
   required PohThemeMode mode,
-  required PohAccent accent,
+  PohAccent? accent,
+  Color? accentColor,
 }) {
+  final seed = accentColor ?? accent?.color ?? PohAccent.forest.color;
   final palette = mode == PohThemeMode.dark
-      ? PohPalette.dark(accent)
-      : PohPalette.light(accent);
+      ? PohPalette.dark(seed)
+      : PohPalette.light(seed);
 
   final base = ThemeData(
     brightness: mode == PohThemeMode.dark ? Brightness.dark : Brightness.light,
@@ -269,6 +294,20 @@ ThemeData buildPohTheme({
         fontSize: 12,
         fontWeight: FontWeight.w700,
       ),
+    ),
+    scrollbarTheme: ScrollbarThemeData(
+      thumbColor: WidgetStateProperty.resolveWith((states) {
+        final alpha = states.contains(WidgetState.hovered) ? 0.56 : 0.34;
+        return palette.muted.withValues(alpha: alpha);
+      }),
+      trackColor: WidgetStateProperty.all(Colors.transparent),
+      trackBorderColor: WidgetStateProperty.all(Colors.transparent),
+      thickness: WidgetStateProperty.resolveWith((states) {
+        return states.contains(WidgetState.hovered) ? 8 : 6;
+      }),
+      radius: const Radius.circular(999),
+      crossAxisMargin: 3,
+      mainAxisMargin: 8,
     ),
     extensions: [palette],
   );

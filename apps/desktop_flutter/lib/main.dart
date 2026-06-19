@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -6,10 +8,11 @@ import 'package:flutter/material.dart';
 import 'models/app_models.dart';
 import 'screens/import_profile_shell.dart';
 import 'screens/logs_shell.dart';
+import 'screens/routes_shell.dart';
+import 'screens/server_profile_editor_shell.dart';
 import 'screens/settings_shell.dart';
 import 'services/app_settings_store.dart';
 import 'services/backend_session_service.dart';
-import 'services/desktop_state_loader.dart';
 import 'services/traffic_metrics_service.dart';
 import 'services/window_controls.dart';
 import 'theme/poh_theme.dart';
@@ -20,7 +23,20 @@ void main() {
   runApp(const ProxyOpenHubApp());
 }
 
-enum _DesktopOverlay { none, settings, logs, importProfile }
+enum _DesktopOverlay {
+  none,
+  settings,
+  routes,
+  logs,
+  importProfile,
+  editProfile
+}
+
+/// The two fixed window sizes (logical px). Shared by the native resize and the
+/// in-window `OverflowBox` so the inner layout is always measured at its final
+/// size and never reflows on intermediate animation frames.
+const Size kExpandedWindow = Size(960, 660);
+const Size kCompactWindow = Size(360, 650);
 
 class ProxyOpenHubApp extends StatefulWidget {
   const ProxyOpenHubApp({super.key});
@@ -32,13 +48,27 @@ class ProxyOpenHubApp extends StatefulWidget {
 class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
   var _themeMode = PohThemeMode.dark;
   var _accent = PohAccent.forest;
+  var _accentFollowsCore = true;
   var _compact = false;
+  // Debug helper: launch with POH_DEBUG_COMPACT=1 / POH_DEBUG_OVERLAY=settings
+  // to land directly on a state for screenshots. Harmless when unset.
+  final bool _debugCompact = Platform.environment['POH_DEBUG_COMPACT'] == '1';
+  final String _debugCoreId = Platform.environment['POH_DEBUG_CORE'] ?? '';
   var _animationsEnabled = true;
   var _animationDurationMs = 520;
   var _density = 'comfortable';
   var _startupMode = 'expanded';
   var _defaultCore = 'TrustTunnel';
   var _defaultRoute = 'Default';
+  var _routesByCore = <String, String>{'trusttunnel': 'Default'};
+  var _routeRulesByCore = <String, RouteRules>{
+    'trusttunnel': RouteRules.empty,
+  };
+  var _activeModeByCore = <String, String>{'trusttunnel': 'tun'};
+  var _routePresetsByCore = <String, List<RoutePreset>>{
+    'trusttunnel': RoutePreset.defaults,
+    'naiveproxy': RoutePreset.defaults,
+  };
   var _autoConnect = false;
   var _socksLan = false;
   var _socksAddress = '127.0.0.1:1080';
@@ -53,12 +83,15 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
   var _progress = 0.0;
   var _download = List<double>.filled(16, 0);
   var _upload = List<double>.filled(16, 0);
+  var _coreSpecs = coreSpecs;
   var _servers = <ServerProfile>[];
   var _profilesLoaded = false;
   var _overlay = _DesktopOverlay.none;
+  ServerProfile? _editingServer;
   String? _connectionMessage;
   final _settingsStore = const AppSettingsStore();
   final _backendSessionService = const BackendSessionService();
+  final _installingCoreIds = <String>{};
   final _trafficMetricsService = TrafficMetricsService();
   final _themeRevealKey = GlobalKey<ThemeRevealWrapperState>();
   final _tabs = <SessionTab>[];
@@ -68,6 +101,8 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
   Timer? _sessionStatusTimer;
   var _trafficSampleInFlight = false;
   var _sessionStatusInFlight = false;
+  SupervisedSession? _supervisorSession;
+  var _expandReveal = 0;
 
   SessionTab get _activeTab {
     return _tabs.firstWhere(
@@ -82,35 +117,56 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
     );
   }
 
-  CoreSpec get _activeCore => findCore(_activeTab.coreId);
+  CoreSpec get _activeCore => findCoreIn(_coreSpecs, _activeTab.coreId);
+
+  String get _activeRoute {
+    return _routesByCore[_activeCore.id] ??
+        _defaultRouteForCore(_activeCore.id);
+  }
+
+  List<ServerProfile> get _activeServers {
+    return _servers
+        .where((server) => server.coreId == _activeCore.id)
+        .toList(growable: false);
+  }
 
   ServerProfile get _selectedServer {
-    if (_servers.isEmpty) {
-      return const ServerProfile(
+    final servers = _activeServers;
+    if (servers.isEmpty) {
+      return ServerProfile(
         id: '',
+        coreId: _activeCore.id,
         name: 'No server selected',
-        host: 'Import a TrustTunnel profile',
-        countryCode: 'TT',
+        host: 'Import or add a profile',
+        countryCode: '--',
         city: '',
         pingMs: 0,
-        dns: 'HTTP/2 - TUN',
+        dns: '${_activeCore.protocol} - ${_activeCore.listener}',
         load: 0,
         tlsVerificationDisabled: false,
       );
     }
 
-    return _servers.firstWhere(
+    return servers.firstWhere(
       (server) => server.id == _activeTab.selectedServerId,
-      orElse: () => _servers.first,
+      orElse: () => servers.first,
     );
   }
 
   bool get _connected => _activeTab.phase == ConnectionPhase.connected;
 
+  Color get _themeAccentColor {
+    return _accentFollowsCore ? _activeCore.accent : _accent.color;
+  }
+
   Duration get _motionDuration {
     return _animationsEnabled
         ? Duration(milliseconds: _animationDurationMs)
         : Duration.zero;
+  }
+
+  Duration get _themeDuration {
+    return _animationsEnabled ? PohMotion.theme : Duration.zero;
   }
 
   bool get _working {
@@ -123,12 +179,17 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
     return AppSettings(
       themeMode: _themeMode,
       accent: _accent,
+      accentFollowsCore: _accentFollowsCore,
       animationsEnabled: _animationsEnabled,
       animationDurationMs: _animationDurationMs,
       density: _density,
       startupMode: _startupMode,
       defaultCore: _defaultCore,
       defaultRoute: _defaultRoute,
+      routesByCore: _routesByCore,
+      routeRulesByCore: _routeRulesByCore,
+      activeModeByCore: _activeModeByCore,
+      routePresetsByCore: _routePresetsByCore,
       autoConnect: _autoConnect,
       socksLan: _socksLan,
       socksAddress: _socksAddress,
@@ -144,7 +205,41 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
   void initState() {
     super.initState();
     _loadSettings();
+    _loadCoreCatalog();
     _loadProfiles();
+    _applyDebugOverlay();
+  }
+
+  void _applyDebugOverlay() {
+    final overlay = Platform.environment['POH_DEBUG_OVERLAY'];
+    if ((overlay == null || overlay.isEmpty) && !_debugCompact) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) {
+        return;
+      }
+      if (_debugCompact) {
+        await WindowControls.setWindowSize(width: 360, height: 650);
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        if (_debugCompact) {
+          _compact = true;
+        }
+        if (overlay != null && overlay.isNotEmpty) {
+          _overlay = switch (overlay) {
+            'logs' => _DesktopOverlay.logs,
+            'routes' => _DesktopOverlay.routes,
+            'import' => _DesktopOverlay.importProfile,
+            'edit' => _DesktopOverlay.editProfile,
+            _ => _DesktopOverlay.settings,
+          };
+        }
+      });
+    });
   }
 
   @override
@@ -156,18 +251,21 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
 
   @override
   Widget build(BuildContext context) {
-    final accent = _accent;
+    final accent = _themeAccentColor;
+    final activeServers = _activeServers;
 
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: buildPohTheme(mode: PohThemeMode.light, accent: accent),
-      darkTheme: buildPohTheme(mode: PohThemeMode.dark, accent: accent),
+      theme: buildPohTheme(mode: PohThemeMode.light, accentColor: accent),
+      darkTheme: buildPohTheme(mode: PohThemeMode.dark, accentColor: accent),
       themeMode: _themeMode.materialMode,
+      themeAnimationDuration: _themeDuration,
+      themeAnimationCurve: PohMotion.standard,
       home: ThemeRevealWrapper(
         key: _themeRevealKey,
         themeMode: _themeMode,
         accent: accent,
-        duration: _motionDuration,
+        duration: _themeDuration,
         builder: (context, _) {
           final palette = PohPalette.of(context);
           return Scaffold(
@@ -180,10 +278,11 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
                     child: _DesktopWindow(
                       compact: _compact,
                       coreMenuOpen: _coreMenuOpen,
+                      cores: _coreSpecs,
                       activeCore: _activeCore,
                       activeTab: _activeTab,
                       selectedServer: _selectedServer,
-                      servers: _servers,
+                      servers: activeServers,
                       profilesLoaded: _profilesLoaded,
                       tabs: _tabs,
                       download: _download,
@@ -193,7 +292,8 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
                       working: _working,
                       connectionMessage: _connectionMessage,
                       themeMode: _themeMode,
-                      motionDuration: _motionDuration,
+                      motionDuration: _morphDuration,
+                      expandReveal: _expandReveal,
                       onToggleCompact: _toggleCompact,
                       onToggleTheme: _toggleTheme,
                       onToggleCoreMenu: () {
@@ -204,10 +304,16 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
                       },
                       onSelectTab: _selectTab,
                       onAddCore: _addCore,
+                      onInstallCore: _installCore,
                       onSelectServer: _selectServer,
+                      onEditServer: _editServer,
                       onToggleConnection: _toggleConnection,
                       onOpenSettings: () {
                         setState(() => _overlay = _DesktopOverlay.settings);
+                      },
+                      activeRoute: _activeRoute,
+                      onOpenRoutes: () {
+                        setState(() => _overlay = _DesktopOverlay.routes);
                       },
                       onOpenLogs: () {
                         setState(() => _overlay = _DesktopOverlay.logs);
@@ -220,29 +326,22 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
                     ),
                   ),
                   if (_overlay != _DesktopOverlay.none)
-                    Positioned.fill(
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () {
-                          setState(() => _overlay = _DesktopOverlay.none);
-                        },
-                        child: ColoredBox(
-                          color: Colors.black.withValues(alpha: 0.38),
-                        ),
-                      ),
-                    ),
-                  if (_overlay != _DesktopOverlay.none)
-                    Center(
+                    _OverlayHost(
+                      compact: _compact,
+                      motion: _motionDuration,
+                      onDismiss: () {
+                        setState(() => _overlay = _DesktopOverlay.none);
+                      },
                       child: _overlay == _DesktopOverlay.settings
                           ? SettingsShell(
                               themeMode: _themeMode,
                               accent: _accent,
+                              accentFollowsCore: _accentFollowsCore,
                               animationsEnabled: _animationsEnabled,
                               animationDurationMs: _animationDurationMs,
                               density: _density,
                               startupMode: _startupMode,
                               defaultCore: _defaultCore,
-                              defaultRoute: _defaultRoute,
                               autoConnect: _autoConnect,
                               socksLan: _socksLan,
                               socksAddress: _socksAddress,
@@ -257,6 +356,12 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
                               onAccentChanged: (value) {
                                 _applySettings(_settings.copyWith(
                                   accent: value,
+                                  accentFollowsCore: false,
+                                ));
+                              },
+                              onAccentFollowsCoreChanged: (value) {
+                                _applySettings(_settings.copyWith(
+                                  accentFollowsCore: value,
                                 ));
                               },
                               onAnimationsEnabledChanged: (value) {
@@ -282,11 +387,6 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
                               onDefaultCoreChanged: (value) {
                                 _applySettings(_settings.copyWith(
                                   defaultCore: value,
-                                ));
-                              },
-                              onDefaultRouteChanged: (value) {
-                                _applySettings(_settings.copyWith(
-                                  defaultRoute: value,
                                 ));
                               },
                               onAutoConnectChanged: (value) {
@@ -338,29 +438,66 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
                                 setState(() => _overlay = _DesktopOverlay.none);
                               },
                             )
-                          : _overlay == _DesktopOverlay.importProfile
-                              ? ImportProfileShell(
+                          : _overlay == _DesktopOverlay.routes
+                              ? RoutesShell(
+                                  activeCoreId: _activeCore.id,
                                   sessionService: _backendSessionService,
-                                  onImported: (_) {
-                                    unawaited(_loadProfiles());
-                                    setState(
-                                      () => _overlay = _DesktopOverlay.none,
-                                    );
-                                  },
+                                  cores: _coreSpecs,
+                                  routesByCore: _routesByCore,
+                                  routeRulesByCore: _routeRulesByCore,
+                                  activeModeByCore: _activeModeByCore,
+                                  routePresetsByCore: _routePresetsByCore,
+                                  onRoutesChanged: _applyRouteSettings,
                                   onClose: () {
                                     setState(
                                       () => _overlay = _DesktopOverlay.none,
                                     );
                                   },
                                 )
-                              : LogsShell(
-                                  sessionService: _backendSessionService,
-                                  onClose: () {
-                                    setState(
-                                      () => _overlay = _DesktopOverlay.none,
-                                    );
-                                  },
-                                ),
+                              : _overlay == _DesktopOverlay.importProfile
+                                  ? ImportProfileShell(
+                                      sessionService: _backendSessionService,
+                                      cores: _coreSpecs,
+                                      activeCoreId: _activeCore.id,
+                                      onImported: (_) {
+                                        unawaited(_loadProfiles());
+                                        setState(
+                                          () => _overlay = _DesktopOverlay.none,
+                                        );
+                                      },
+                                      onClose: () {
+                                        setState(
+                                          () => _overlay = _DesktopOverlay.none,
+                                        );
+                                      },
+                                    )
+                                  : _overlay == _DesktopOverlay.editProfile &&
+                                          _editingServer != null
+                                      ? ServerProfileEditorShell(
+                                          sessionService:
+                                              _backendSessionService,
+                                          core: _activeCore,
+                                          profile: _editingServer!,
+                                          onSaved: (_) {
+                                            unawaited(_loadProfiles());
+                                          },
+                                          onClose: () {
+                                            setState(() {
+                                              _overlay = _DesktopOverlay.none;
+                                              _editingServer = null;
+                                            });
+                                          },
+                                        )
+                                      : LogsShell(
+                                          sessionService:
+                                              _backendSessionService,
+                                          onClose: () {
+                                            setState(
+                                              () => _overlay =
+                                                  _DesktopOverlay.none,
+                                            );
+                                          },
+                                        ),
                     ),
                 ],
               ),
@@ -396,6 +533,70 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
     );
   }
 
+  Future<void> _loadCoreCatalog() async {
+    try {
+      final catalog = await _backendSessionService.coreCatalog();
+      if (!mounted) {
+        return;
+      }
+
+      final entriesByCore = {
+        for (final entry in catalog.cores) entry.coreId: entry,
+      };
+      setState(() {
+        _coreSpecs = [
+          for (final spec in coreSpecs)
+            _specFromCatalogEntry(
+              spec,
+              entriesByCore[spec.id],
+            ),
+        ];
+      });
+    } on Object {
+      // The app can still render with the built-in static catalog when the Rust
+      // backend has not been built yet. This keeps first-run UI development
+      // usable without weakening the runtime install path.
+    }
+  }
+
+  CoreSpec _specFromCatalogEntry(
+    CoreSpec spec,
+    BackendCoreCatalogEntry? entry,
+  ) {
+    if (entry == null) {
+      return spec;
+    }
+
+    final openable = spec.id == 'trusttunnel' || entry.installed;
+    final installable = entry.installable && !entry.installed;
+    return spec.copyWith(
+      name: entry.displayName.isNotEmpty ? entry.displayName : spec.name,
+      tagline: _catalogTagline(spec, entry),
+      status: openable ? CoreStatus.active : CoreStatus.planned,
+      installable: installable,
+      installing: _installingCoreIds.contains(spec.id),
+    );
+  }
+
+  String _catalogTagline(
+    CoreSpec spec,
+    BackendCoreCatalogEntry entry,
+  ) {
+    if (entry.activeVersion != null) {
+      return 'Installed ${entry.activeVersion}';
+    }
+    if (spec.id == 'trusttunnel') {
+      return 'Native core, managed bundle';
+    }
+    if (entry.installable) {
+      return 'Ready to install';
+    }
+    if (entry.sourceStatus == 'planned') {
+      return 'Trusted source planned';
+    }
+    return 'Locked until pinned';
+  }
+
   void _applySettings(
     AppSettings settings, {
     bool persist = true,
@@ -404,12 +605,30 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
     setState(() {
       _themeMode = settings.themeMode;
       _accent = settings.accent;
+      _accentFollowsCore = settings.accentFollowsCore;
       _animationsEnabled = settings.animationsEnabled;
       _animationDurationMs = settings.animationDurationMs;
       _density = settings.density;
       _startupMode = settings.startupMode;
       _defaultCore = settings.defaultCore;
       _defaultRoute = settings.defaultRoute;
+      _routesByCore = Map.of(settings.routesByCore);
+      _routesByCore.putIfAbsent('trusttunnel', () => _defaultRoute);
+      _routeRulesByCore = Map.of(settings.routeRulesByCore);
+      _routeRulesByCore.putIfAbsent(
+        'trusttunnel',
+        () => RouteRules.empty,
+      );
+      _activeModeByCore = Map.of(settings.activeModeByCore);
+      _activeModeByCore.putIfAbsent('trusttunnel', () => 'tun');
+      _routePresetsByCore = {
+        for (final entry in settings.routePresetsByCore.entries)
+          entry.key: List<RoutePreset>.of(entry.value),
+      };
+      _routePresetsByCore.putIfAbsent(
+        'trusttunnel',
+        () => RoutePreset.defaults,
+      );
       _autoConnect = settings.autoConnect;
       _socksLan = settings.socksLan;
       _socksAddress = settings.socksAddress;
@@ -419,7 +638,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
       _httpsUrl = settings.httpsUrl;
       _timeoutSeconds = settings.timeoutSeconds;
       if (applyStartupModeToCurrentWindow) {
-        _compact = settings.startupMode == 'compact';
+        _compact = _debugCompact || settings.startupMode == 'compact';
       }
     });
 
@@ -432,6 +651,46 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
     await _settingsStore.save(_settings);
   }
 
+  void _applyRouteSettings(
+    Map<String, String> routesByCore,
+    Map<String, RouteRules> routeRulesByCore,
+    Map<String, String> activeModeByCore,
+    Map<String, List<RoutePreset>> routePresetsByCore,
+  ) {
+    final nextRoutes = Map<String, String>.of(routesByCore);
+    final nextRules = Map<String, RouteRules>.of(routeRulesByCore);
+    final nextModes = Map<String, String>.of(activeModeByCore);
+    final nextPresets = {
+      for (final entry in routePresetsByCore.entries)
+        entry.key: List<RoutePreset>.of(entry.value),
+    };
+    final trustTunnelRoute =
+        nextRoutes['trusttunnel'] ?? _defaultRouteForCore('trusttunnel');
+    nextRules.putIfAbsent('trusttunnel', () => RouteRules.empty);
+    nextModes.putIfAbsent('trusttunnel', () => 'tun');
+    nextPresets.putIfAbsent('trusttunnel', () => RoutePreset.defaults);
+
+    _applySettings(
+      _settings.copyWith(
+        defaultRoute: trustTunnelRoute,
+        routesByCore: nextRoutes,
+        routeRulesByCore: nextRules,
+        activeModeByCore: nextModes,
+        routePresetsByCore: nextPresets,
+      ),
+    );
+  }
+
+  String _defaultRouteForCore(String coreId) {
+    return switch (coreId) {
+      'naiveproxy' => 'Proxy only',
+      'sing-box' => 'Rule set',
+      'xray-core' => 'Proxy only',
+      'hysteria2' => 'Proxy only',
+      _ => 'Default',
+    };
+  }
+
   void _addCore(String coreId) {
     final alreadyOpen = _tabs.any((tab) => tab.coreId == coreId);
     if (alreadyOpen) {
@@ -440,7 +699,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
       return;
     }
 
-    final core = findCore(coreId);
+    final core = findCoreIn(_coreSpecs, coreId);
     if (core.status != CoreStatus.active) {
       setState(() => _coreMenuOpen = false);
       return;
@@ -452,7 +711,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
         SessionTab(
           id: id,
           coreId: coreId,
-          selectedServerId: _servers.isEmpty ? '' : _servers.first.id,
+          selectedServerId: _firstServerIdForCore(coreId),
           phase: ConnectionPhase.idle,
           connectedAt: null,
         ),
@@ -461,6 +720,34 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
       _coreMenuOpen = false;
       _progress = 0;
     });
+  }
+
+  Future<void> _installCore(String coreId) async {
+    if (_installingCoreIds.contains(coreId)) return;
+    setState(() {
+      _installingCoreIds.add(coreId);
+      _coreSpecs = [
+        for (final spec in _coreSpecs)
+          if (spec.id == coreId) spec.copyWith(installing: true) else spec,
+      ];
+    });
+    try {
+      await _backendSessionService.coreInstall(coreId);
+      if (!mounted) return;
+      await _loadCoreCatalog();
+    } on Object {
+      // Keep the spec visible; catalog reload on next open will show real state.
+    } finally {
+      if (mounted) {
+        setState(() {
+          _installingCoreIds.remove(coreId);
+          _coreSpecs = [
+            for (final spec in _coreSpecs)
+              if (spec.id == coreId) spec.copyWith(installing: false) else spec,
+          ];
+        });
+      }
+    }
   }
 
   void _selectServer(String id) {
@@ -489,8 +776,19 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
     _stopTraffic();
   }
 
+  void _editServer(ServerProfile server) {
+    if (server.id.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _editingServer = server;
+      _overlay = _DesktopOverlay.editProfile;
+    });
+  }
+
   void _toggleConnection() {
-    if (_servers.isEmpty) {
+    if (_activeServers.isEmpty) {
       return;
     }
 
@@ -504,18 +802,22 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
     }
   }
 
+  Duration get _morphDuration => _motionDuration;
+
   void _toggleCompact() {
     final compact = !_compact;
     setState(() {
       _compact = compact;
       _coreMenuOpen = false;
+      if (!compact) _expandReveal++;
     });
 
+    final target = compact ? kCompactWindow : kExpandedWindow;
     unawaited(
       WindowControls.animateWindowSize(
-        width: compact ? 360 : 960,
-        height: compact ? 650 : 660,
-        duration: _motionDuration,
+        width: target.width,
+        height: target.height,
+        duration: _morphDuration,
       ),
     );
   }
@@ -533,8 +835,8 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
     }
 
     final reveal = _themeRevealKey.currentState;
-    final accent = _accent;
-    if (reveal == null || _motionDuration == Duration.zero) {
+    final accent = _themeAccentColor;
+    if (reveal == null || _themeDuration == Duration.zero) {
       setState(() => _themeMode = mode);
       unawaited(_saveSettings());
       return;
@@ -567,15 +869,30 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
     });
 
     try {
-      final session =
-          await _backendSessionService.startTrustTunnelSession(server);
+      final supervised = await _backendSessionService.startSupervisedSession(
+        _activeCore.id,
+        server,
+      );
       if (!mounted || id != _activeTabId) {
+        await supervised.stop();
         return;
       }
 
+      _supervisorSession = supervised;
+
+      // Listen for supervisor events (crash detection, clean stop confirmation).
+      supervised.process.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen(
+            (line) => _onSupervisorEvent(line, id),
+            onDone: () => _onSupervisorExited(id),
+          );
+
       _patchTab(id, phase: ConnectionPhase.authenticating);
       setState(() {
-        _connectionMessage = 'TrustTunnel core started: PID ${session.pid}';
+        _connectionMessage =
+            '${supervised.session.coreId} core started: PID ${supervised.session.pid}';
         _progress = 0.82;
       });
       await Future<void>.delayed(const Duration(milliseconds: 220));
@@ -587,7 +904,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
         id,
         phase: ConnectionPhase.connected,
         connectedAt: DateTime.fromMillisecondsSinceEpoch(
-          session.startedAtUnixMs,
+          supervised.session.startedAtUnixMs,
         ),
       );
       setState(() {
@@ -595,6 +912,8 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
         _progress = 1;
       });
       _startTraffic();
+      // Status polling is kept as a safety net in case the supervisor itself
+      // exits without emitting a faulted event.
       _startSessionStatusPolling();
     } catch (error) {
       if (!mounted) {
@@ -619,8 +938,15 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
     _patchTab(id, phase: ConnectionPhase.disconnecting);
     setState(() => _progress = 0.18);
 
+    final supervisor = _supervisorSession;
+    _supervisorSession = null;
+
     try {
-      await _backendSessionService.stopTrustTunnelSession();
+      if (supervisor != null) {
+        await supervisor.stop();
+      } else {
+        await _backendSessionService.stopSession();
+      }
       if (!mounted || id != _activeTabId) {
         return;
       }
@@ -645,6 +971,51 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
       });
       _startTraffic();
       _startSessionStatusPolling();
+    }
+  }
+
+  /// Handles JSON-line events emitted by the long-lived supervisor process.
+  void _onSupervisorEvent(String line, int tabId) {
+    if (!mounted || _activeTabId != tabId) return;
+    final Map<String, dynamic> event;
+    try {
+      final decoded = jsonDecode(line);
+      if (decoded is! Map<String, dynamic>) return;
+      event = decoded;
+    } catch (_) {
+      return;
+    }
+    final type = event['type'] as String?;
+    if (type == 'faulted') {
+      // Core exited unexpectedly; network already restored by the supervisor.
+      _clearTimers();
+      _stopTraffic();
+      _supervisorSession = null;
+      _patchTab(tabId, phase: ConnectionPhase.idle, clearConnectedAt: true);
+      setState(() {
+        _connectionMessage = 'Core exited unexpectedly';
+        _progress = 0;
+        _download = List<double>.filled(16, 0);
+        _upload = List<double>.filled(16, 0);
+      });
+    }
+  }
+
+  /// Called when the supervisor process stdout stream closes (supervisor exited).
+  void _onSupervisorExited(int tabId) {
+    if (!mounted || _activeTabId != tabId) return;
+    // If still showing as connected, treat the supervisor exit as a fault.
+    if (_activeTab.phase == ConnectionPhase.connected) {
+      _clearTimers();
+      _stopTraffic();
+      _supervisorSession = null;
+      _patchTab(tabId, phase: ConnectionPhase.idle, clearConnectedAt: true);
+      setState(() {
+        _connectionMessage = 'Core supervisor exited unexpectedly';
+        _progress = 0;
+        _download = List<double>.filled(16, 0);
+        _upload = List<double>.filled(16, 0);
+      });
     }
   }
 
@@ -719,7 +1090,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
 
       _sessionStatusInFlight = true;
       try {
-        final status = await _backendSessionService.trustTunnelSessionStatus();
+        final status = await _backendSessionService.sessionStatus();
         if (!mounted || !_connected || status.running) {
           return;
         }
@@ -729,7 +1100,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
         _patchTab(_activeTabId,
             phase: ConnectionPhase.idle, clearConnectedAt: true);
         setState(() {
-          _connectionMessage = 'TrustTunnel core exited';
+          _connectionMessage = '${_activeCore.name} core exited';
           _progress = 0;
           _download = List<double>.filled(16, 0);
           _upload = List<double>.filled(16, 0);
@@ -752,28 +1123,58 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
   }
 
   Future<void> _loadProfiles() async {
-    final loaded = await const DesktopStateLoader().loadProfiles();
+    final loaded = await _backendSessionService.listProfiles();
     if (!mounted) {
       return;
     }
 
     setState(() {
+      final initialCoreId = _coreSpecs.any((core) => core.id == _debugCoreId)
+          ? _debugCoreId
+          : 'trusttunnel';
       _servers = loaded;
+      final initialServerId = _firstServerIdForCore(initialCoreId);
       _profilesLoaded = true;
       _tabs
         ..clear()
         ..add(
           SessionTab(
             id: 1,
-            coreId: 'trusttunnel',
-            selectedServerId: loaded.isEmpty ? '' : loaded.first.id,
+            coreId: initialCoreId,
+            selectedServerId: initialServerId,
             phase: ConnectionPhase.idle,
             connectedAt: null,
           ),
         );
       _activeTabId = 1;
       _nextTabId = 1;
+      if (Platform.environment['POH_DEBUG_OVERLAY'] == 'edit') {
+        _editingServer = _firstServerForCore(initialCoreId);
+        _overlay = _editingServer == null
+            ? _DesktopOverlay.none
+            : _DesktopOverlay.editProfile;
+      }
     });
+  }
+
+  String _firstServerIdForCore(String coreId) {
+    for (final server in _servers) {
+      if (server.coreId == coreId) {
+        return server.id;
+      }
+    }
+
+    return '';
+  }
+
+  ServerProfile? _firstServerForCore(String coreId) {
+    for (final server in _servers) {
+      if (server.coreId == coreId) {
+        return server;
+      }
+    }
+
+    return null;
   }
 }
 
@@ -781,6 +1182,7 @@ class _DesktopWindow extends StatelessWidget {
   const _DesktopWindow({
     required this.compact,
     required this.coreMenuOpen,
+    required this.cores,
     required this.activeCore,
     required this.activeTab,
     required this.selectedServer,
@@ -794,22 +1196,28 @@ class _DesktopWindow extends StatelessWidget {
     required this.working,
     required this.connectionMessage,
     required this.themeMode,
+    required this.activeRoute,
     required this.motionDuration,
+    required this.expandReveal,
     required this.onToggleCompact,
     required this.onToggleTheme,
     required this.onToggleCoreMenu,
     required this.onDismissCoreMenu,
     required this.onSelectTab,
     required this.onAddCore,
+    required this.onInstallCore,
     required this.onSelectServer,
+    required this.onEditServer,
     required this.onToggleConnection,
     required this.onOpenSettings,
+    required this.onOpenRoutes,
     required this.onOpenLogs,
     required this.onOpenImportProfile,
   });
 
   final bool compact;
   final bool coreMenuOpen;
+  final List<CoreSpec> cores;
   final CoreSpec activeCore;
   final SessionTab activeTab;
   final ServerProfile selectedServer;
@@ -823,87 +1231,119 @@ class _DesktopWindow extends StatelessWidget {
   final bool working;
   final String? connectionMessage;
   final PohThemeMode themeMode;
+  final String activeRoute;
   final Duration motionDuration;
+  final int expandReveal;
   final VoidCallback onToggleCompact;
   final ValueChanged<Offset> onToggleTheme;
   final VoidCallback onToggleCoreMenu;
   final VoidCallback onDismissCoreMenu;
   final ValueChanged<int> onSelectTab;
   final ValueChanged<String> onAddCore;
+  final ValueChanged<String> onInstallCore;
   final ValueChanged<String> onSelectServer;
+  final ValueChanged<ServerProfile> onEditServer;
   final VoidCallback onToggleConnection;
   final VoidCallback onOpenSettings;
+  final VoidCallback onOpenRoutes;
   final VoidCallback onOpenLogs;
   final VoidCallback onOpenImportProfile;
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final compactLayout = compact || constraints.maxWidth < 720;
+    final target = compact ? kCompactWindow : kExpandedWindow;
 
-        return Stack(
-          children: [
-            Positioned.fill(
-              child: Column(
-                children: [
-                  _TitleBar(
-                    compact: compactLayout,
-                    activeCore: activeCore,
-                    activeTab: activeTab,
-                    tabs: tabs,
-                    onToggleCompact: onToggleCompact,
-                    onToggleCoreMenu: onToggleCoreMenu,
-                    onSelectTab: onSelectTab,
-                  ),
-                  Expanded(
-                    child: _MorphingBody(
-                      compact: compactLayout,
-                      activeCore: activeCore,
-                      activeTab: activeTab,
-                      selectedServer: selectedServer,
-                      servers: servers,
-                      profilesLoaded: profilesLoaded,
-                      download: download,
-                      upload: upload,
-                      progress: progress,
-                      connected: connected,
-                      working: working,
-                      connectionMessage: connectionMessage,
-                      themeMode: themeMode,
-                      motionDuration: motionDuration,
-                      onSelectServer: onSelectServer,
-                      onToggleConnection: onToggleConnection,
-                      onToggleTheme: onToggleTheme,
-                      onOpenSettings: onOpenSettings,
-                      onOpenLogs: onOpenLogs,
-                      onOpenImportProfile: onOpenImportProfile,
-                    ),
-                  ),
-                ],
+    // Shutter/mask: the inner UI is always laid out at its final target size, so
+    // the native window resize never squeezes it (no RenderFlex overflow, no
+    // per-letter text). ClipRect masks it down to the live window size, and the
+    // RepaintBoundary keeps the cached content on its own GPU layer so resizing
+    // only recomposites instead of repainting the whole tree.
+    return ClipRect(
+      child: OverflowBox(
+        alignment: Alignment.topLeft,
+        minWidth: target.width,
+        maxWidth: target.width,
+        minHeight: target.height,
+        maxHeight: target.height,
+        child: RepaintBoundary(
+          child: SizedBox(
+            width: target.width,
+            height: target.height,
+            child: _content(context),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _content(BuildContext context) {
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Column(
+            children: [
+              _TitleBar(
+                compact: compact,
+                activeCore: activeCore,
+                activeTab: activeTab,
+                cores: cores,
+                tabs: tabs,
+                onToggleCompact: onToggleCompact,
+                onToggleCoreMenu: onToggleCoreMenu,
+                onSelectTab: onSelectTab,
               ),
+              Expanded(
+                child: _MorphingBody(
+                  compact: compact,
+                  activeCore: activeCore,
+                  activeTab: activeTab,
+                  selectedServer: selectedServer,
+                  servers: servers,
+                  profilesLoaded: profilesLoaded,
+                  download: download,
+                  upload: upload,
+                  progress: progress,
+                  connected: connected,
+                  working: working,
+                  connectionMessage: connectionMessage,
+                  themeMode: themeMode,
+                  activeRoute: activeRoute,
+                  motionDuration: motionDuration,
+                  expandReveal: expandReveal,
+                  onSelectServer: onSelectServer,
+                  onEditServer: onEditServer,
+                  onToggleConnection: onToggleConnection,
+                  onToggleTheme: onToggleTheme,
+                  onOpenSettings: onOpenSettings,
+                  onOpenRoutes: onOpenRoutes,
+                  onOpenLogs: onOpenLogs,
+                  onOpenImportProfile: onOpenImportProfile,
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (coreMenuOpen)
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: onDismissCoreMenu,
+              child: const SizedBox.expand(),
             ),
-            if (coreMenuOpen)
-              Positioned.fill(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onTap: onDismissCoreMenu,
-                  child: const SizedBox.expand(),
-                ),
-              ),
-            if (coreMenuOpen)
-              Positioned(
-                left: compactLayout ? 52 : 68,
-                top: 48,
-                child: _CoreMenu(
-                  activeCoreId: activeCore.id,
-                  openTabs: tabs,
-                  onAddCore: onAddCore,
-                ),
-              ),
-          ],
-        );
-      },
+          ),
+        if (coreMenuOpen)
+          Positioned(
+            left: compact ? 52 : 68,
+            top: 48,
+            child: _CoreMenu(
+              cores: cores,
+              activeCoreId: activeCore.id,
+              openTabs: tabs,
+              onAddCore: onAddCore,
+              onInstallCore: onInstallCore,
+            ),
+          ),
+      ],
     );
   }
 }
@@ -913,6 +1353,7 @@ class _TitleBar extends StatelessWidget {
     required this.compact,
     required this.activeCore,
     required this.activeTab,
+    required this.cores,
     required this.tabs,
     required this.onToggleCompact,
     required this.onToggleCoreMenu,
@@ -922,6 +1363,7 @@ class _TitleBar extends StatelessWidget {
   final bool compact;
   final CoreSpec activeCore;
   final SessionTab activeTab;
+  final List<CoreSpec> cores;
   final List<SessionTab> tabs;
   final VoidCallback onToggleCompact;
   final VoidCallback onToggleCoreMenu;
@@ -966,6 +1408,7 @@ class _TitleBar extends StatelessWidget {
                   children: [
                     for (final tab in tabs)
                       _CoreTabButton(
+                        core: findCoreIn(cores, tab.coreId),
                         tab: tab,
                         active: tab.id == activeTab.id,
                         onPressed: () => onSelectTab(tab.id),
@@ -1027,11 +1470,15 @@ class _MorphingBody extends StatelessWidget {
     required this.working,
     required this.connectionMessage,
     required this.themeMode,
+    required this.activeRoute,
     required this.motionDuration,
+    required this.expandReveal,
     required this.onSelectServer,
+    required this.onEditServer,
     required this.onToggleConnection,
     required this.onToggleTheme,
     required this.onOpenSettings,
+    required this.onOpenRoutes,
     required this.onOpenLogs,
     required this.onOpenImportProfile,
   });
@@ -1049,42 +1496,43 @@ class _MorphingBody extends StatelessWidget {
   final bool working;
   final String? connectionMessage;
   final PohThemeMode themeMode;
+  final String activeRoute;
   final Duration motionDuration;
+  final int expandReveal;
   final ValueChanged<String> onSelectServer;
+  final ValueChanged<ServerProfile> onEditServer;
   final VoidCallback onToggleConnection;
   final ValueChanged<Offset> onToggleTheme;
   final VoidCallback onOpenSettings;
+  final VoidCallback onOpenRoutes;
   final VoidCallback onOpenLogs;
   final VoidCallback onOpenImportProfile;
 
   @override
   Widget build(BuildContext context) {
     final sidebarWidth = compact ? double.infinity : 316.0;
-    const compactPanelHeight = 216.0;
+    const compactPanelHeight = 202.0;
     const expandedSidebarWidth = 316.0;
-    const ringSize = 170.0;
-    const compactButtonHeight = 56.0;
-    final curve = motionDuration == Duration.zero
-        ? Curves.linear
-        : Curves.fastLinearToSlowEaseIn;
+    final curve =
+        motionDuration == Duration.zero ? Curves.linear : PohMotion.standard;
 
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
         final height = constraints.maxHeight;
-        final rightWidth = math.max(0.0, width - expandedSidebarWidth);
+        // Each panel is sized for its OWN mode using the shared window
+        // constants, then only slid on/off screen. So the expanded detail pane
+        // is always measured at its full width and the compact dock always at
+        // its full width - neither ever reflows its text while the window
+        // animates; the off-mode one is simply parked off-canvas and clipped.
+        final detailWidth = kExpandedWindow.width - expandedSidebarWidth;
+        final detailHeight = kExpandedWindow.height - 48;
+        final dockWidth = kCompactWindow.width;
         final sidebarHeight =
             compact ? math.max(0.0, height - compactPanelHeight) : height;
-        final detailLeft = compact ? width + 24 : expandedSidebarWidth;
-        final detailWidth = compact ? rightWidth : rightWidth;
-        final ringLeft = compact
-            ? 12.0
-            : expandedSidebarWidth + math.max(0.0, (rightWidth - ringSize) / 2);
-        final ringTop = compact
-            ? math.max(0.0, height - 12 - compactButtonHeight)
-            : math.max(88.0, (height - ringSize) / 2 - 88);
-        final ringWidth = compact ? math.max(0.0, width - 24) : ringSize;
-        final ringHeight = compact ? compactButtonHeight : ringSize;
+
+        // Removed detailLeft. The detail pane stays in place horizontally and slides down.
+        final detailTop = compact ? 40.0 : 0.0;
 
         return ClipRect(
           child: Stack(
@@ -1104,9 +1552,11 @@ class _MorphingBody extends StatelessWidget {
                   connected: connected,
                   compact: compact,
                   onSelectServer: onSelectServer,
+                  onEditServer: onEditServer,
                   onToggleTheme: onToggleTheme,
                   themeMode: themeMode,
                   onOpenSettings: onOpenSettings,
+                  onOpenRoutes: onOpenRoutes,
                   onOpenLogs: onOpenLogs,
                   onOpenImportProfile: onOpenImportProfile,
                 ),
@@ -1114,10 +1564,10 @@ class _MorphingBody extends StatelessWidget {
               AnimatedPositioned(
                 duration: motionDuration,
                 curve: curve,
-                left: detailLeft,
-                top: 0,
+                left: expandedSidebarWidth,
+                top: detailTop,
                 width: detailWidth,
-                height: height,
+                height: detailHeight,
                 child: IgnorePointer(
                   ignoring: compact,
                   child: AnimatedOpacity(
@@ -1125,6 +1575,7 @@ class _MorphingBody extends StatelessWidget {
                     curve: Curves.easeOutCubic,
                     opacity: compact ? 0 : 1,
                     child: _ExpandedDetailPane(
+                      key: ValueKey(expandReveal),
                       activeCore: activeCore,
                       activeTab: activeTab,
                       selectedServer: selectedServer,
@@ -1132,24 +1583,31 @@ class _MorphingBody extends StatelessWidget {
                       upload: upload,
                       connected: connected,
                       connectionMessage: connectionMessage,
+                      activeRoute: activeRoute,
+                      motionDuration: motionDuration,
+                      onOpenRoutes: onOpenRoutes,
+                      progress: progress,
+                      working: working,
+                      onToggleConnection: onToggleConnection,
                     ),
                   ),
                 ),
               ),
-              AnimatedPositioned(
-                duration: motionDuration,
-                curve: curve,
-                left: compact ? 0 : -width,
+              Positioned(
+                left: 0,
                 bottom: 0,
-                width: width,
+                width: dockWidth,
                 height: compactPanelHeight,
                 child: IgnorePointer(
                   ignoring: !compact,
+                  // The dock pane manages its own staggered internal opacity,
+                  // but we give it a master opacity so it fully fades when expanding.
                   child: AnimatedOpacity(
                     duration: motionDuration,
                     curve: Curves.easeOutCubic,
                     opacity: compact ? 1 : 0,
                     child: _CompactDockPane(
+                      key: ValueKey(compact),
                       activeCore: activeCore,
                       activeTab: activeTab,
                       selectedServer: selectedServer,
@@ -1157,24 +1615,15 @@ class _MorphingBody extends StatelessWidget {
                       themeMode: themeMode,
                       onToggleTheme: onToggleTheme,
                       onOpenSettings: onOpenSettings,
+                      onOpenRoutes: onOpenRoutes,
                       onOpenLogs: onOpenLogs,
+                      motionDuration: motionDuration,
+                      compact: compact,
+                      progress: progress,
+                      working: working,
+                      onToggleConnection: onToggleConnection,
                     ),
                   ),
-                ),
-              ),
-              AnimatedPositioned(
-                duration: motionDuration,
-                curve: curve,
-                left: ringLeft,
-                top: ringTop,
-                width: ringWidth,
-                height: ringHeight,
-                child: _MorphingConnectControl(
-                  compact: compact,
-                  phase: activeTab.phase,
-                  progress: progress,
-                  duration: motionDuration,
-                  onPressed: working ? null : onToggleConnection,
                 ),
               ),
             ],
@@ -1187,6 +1636,7 @@ class _MorphingBody extends StatelessWidget {
 
 class _ExpandedDetailPane extends StatelessWidget {
   const _ExpandedDetailPane({
+    super.key,
     required this.activeCore,
     required this.activeTab,
     required this.selectedServer,
@@ -1194,6 +1644,12 @@ class _ExpandedDetailPane extends StatelessWidget {
     required this.upload,
     required this.connected,
     required this.connectionMessage,
+    required this.activeRoute,
+    required this.motionDuration,
+    required this.onOpenRoutes,
+    required this.progress,
+    required this.working,
+    required this.onToggleConnection,
   });
 
   final CoreSpec activeCore;
@@ -1203,6 +1659,12 @@ class _ExpandedDetailPane extends StatelessWidget {
   final List<double> upload;
   final bool connected;
   final String? connectionMessage;
+  final String activeRoute;
+  final Duration motionDuration;
+  final VoidCallback onOpenRoutes;
+  final double progress;
+  final bool working;
+  final VoidCallback? onToggleConnection;
 
   @override
   Widget build(BuildContext context) {
@@ -1211,40 +1673,69 @@ class _ExpandedDetailPane extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(26, 18, 26, 22),
       child: Column(
         children: [
-          _ServerStrip(server: selectedServer),
+          _AppearIn(
+            motionDuration: motionDuration,
+            child: _ServerStrip(server: selectedServer),
+          ),
           Expanded(
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final ringSpace = math.min(204.0, constraints.maxHeight * 0.38);
+                final ringDiameter = math.min(170.0, ringSpace);
                 return Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    SizedBox(height: ringSpace),
-                    _ConnectionStatus(
-                      phase: activeTab.phase,
-                      core: activeCore,
-                      connectedAt: activeTab.connectedAt,
-                      message: connectionMessage,
+                    _AppearIn(
+                      motionDuration: motionDuration,
+                      child: SizedBox(
+                        height: ringSpace,
+                        child: Center(
+                          child: SizedBox.square(
+                            dimension: ringDiameter,
+                            child: _MorphingConnectControl(
+                              compact: false,
+                              phase: activeTab.phase,
+                              progress: progress,
+                              duration: Duration.zero,
+                              onPressed: working ? null : onToggleConnection,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    _AppearIn(
+                      motionDuration: motionDuration,
+                      delay: const Duration(milliseconds: 50),
+                      child: _ConnectionStatus(
+                        phase: activeTab.phase,
+                        core: activeCore,
+                        connectedAt: activeTab.connectedAt,
+                        message: connectionMessage,
+                      ),
                     ),
                     const SizedBox(height: 14),
-                    Wrap(
-                      alignment: WrapAlignment.center,
-                      spacing: 16,
-                      runSpacing: 10,
-                      children: [
-                        _MetricCard(
-                          title: 'DOWNLOAD',
-                          value: connected ? download.last : 0,
-                          sparkline: download,
-                          primary: true,
-                        ),
-                        _MetricCard(
-                          title: 'UPLOAD',
-                          value: connected ? upload.last : 0,
-                          sparkline: upload,
-                          primary: false,
-                        ),
-                      ],
+                    _AppearIn(
+                      motionDuration: motionDuration,
+                      delay: const Duration(milliseconds: 100),
+                      child: Wrap(
+                        alignment: WrapAlignment.center,
+                        spacing: 16,
+                        runSpacing: 10,
+                        children: [
+                          _MetricCard(
+                            title: 'DOWNLOAD',
+                            value: connected ? download.last : 0,
+                            sparkline: download,
+                            primary: true,
+                          ),
+                          _MetricCard(
+                            title: 'UPLOAD',
+                            value: connected ? upload.last : 0,
+                            sparkline: upload,
+                            primary: false,
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 );
@@ -1253,15 +1744,91 @@ class _ExpandedDetailPane extends StatelessWidget {
           ),
           Container(height: 1, color: palette.border),
           const SizedBox(height: 14),
-          _DetailBar(core: activeCore, server: selectedServer),
+          _AppearIn(
+            motionDuration: motionDuration,
+            delay: const Duration(milliseconds: 150),
+            child: _DetailBar(
+              core: activeCore,
+              server: selectedServer,
+              activeRoute: activeRoute,
+              onOpenRoutes: onOpenRoutes,
+            ),
+          ),
         ],
       ),
     );
   }
 }
 
+/// Cascade entrance animation: fade-in + slight upward slide.
+/// Applied to each major section of [_ExpandedDetailPane] with staggered
+/// [delay]s so the pane fills in sequentially when expanding.
+///
+/// When [motionDuration] is [Duration.zero] (animations disabled), the child
+/// is rendered immediately without animation.
+class _AppearIn extends StatefulWidget {
+  const _AppearIn({
+    required this.child,
+    required this.motionDuration,
+    this.delay = Duration.zero,
+    this.slideOffset = 6.0,
+  });
+
+  final Widget child;
+  final Duration motionDuration;
+  final Duration delay;
+  final double slideOffset;
+
+  @override
+  State<_AppearIn> createState() => _AppearInState();
+}
+
+class _AppearInState extends State<_AppearIn> {
+  bool _visible = false;
+  Timer? _delayTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.motionDuration == Duration.zero ||
+        widget.delay == Duration.zero) {
+      _visible = true;
+    } else {
+      _delayTimer = Timer(widget.delay, () {
+        if (mounted) setState(() => _visible = true);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _delayTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.motionDuration == Duration.zero) return widget.child;
+    if (!_visible) return Opacity(opacity: 0, child: widget.child);
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: widget.motionDuration,
+      curve: PohMotion.decel,
+      builder: (context, t, child) => Opacity(
+        opacity: t,
+        child: Transform.translate(
+          offset: Offset(0, widget.slideOffset * (1 - t)),
+          child: child,
+        ),
+      ),
+      child: widget.child,
+    );
+  }
+}
+
 class _CompactDockPane extends StatelessWidget {
   const _CompactDockPane({
+    super.key,
     required this.activeCore,
     required this.activeTab,
     required this.selectedServer,
@@ -1269,7 +1836,13 @@ class _CompactDockPane extends StatelessWidget {
     required this.themeMode,
     required this.onToggleTheme,
     required this.onOpenSettings,
+    required this.onOpenRoutes,
     required this.onOpenLogs,
+    required this.motionDuration,
+    required this.compact,
+    required this.progress,
+    required this.working,
+    required this.onToggleConnection,
   });
 
   final CoreSpec activeCore;
@@ -1279,7 +1852,13 @@ class _CompactDockPane extends StatelessWidget {
   final PohThemeMode themeMode;
   final ValueChanged<Offset> onToggleTheme;
   final VoidCallback onOpenSettings;
+  final VoidCallback onOpenRoutes;
   final VoidCallback onOpenLogs;
+  final Duration motionDuration;
+  final bool compact;
+  final double progress;
+  final bool working;
+  final VoidCallback? onToggleConnection;
 
   @override
   Widget build(BuildContext context) {
@@ -1290,50 +1869,85 @@ class _CompactDockPane extends StatelessWidget {
         border: Border(top: BorderSide(color: palette.border)),
       ),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 78),
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
         child: Column(
           children: [
-            _DockServerCard(core: activeCore, server: selectedServer),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: _ConnectionStatus(
-                    phase: activeTab.phase,
-                    core: activeCore,
-                    connectedAt: activeTab.connectedAt,
-                    message: connectionMessage,
-                    compact: true,
+            _AppearIn(
+              motionDuration: motionDuration,
+              delay: const Duration(milliseconds: 100),
+              slideOffset: 30.0,
+              child: _DockServerCard(core: activeCore, server: selectedServer),
+            ),
+            const SizedBox(height: 8),
+            _AppearIn(
+              motionDuration: motionDuration,
+              delay: const Duration(milliseconds: 200),
+              slideOffset: 40.0,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: _ConnectionStatus(
+                      phase: activeTab.phase,
+                      core: activeCore,
+                      connectedAt: activeTab.connectedAt,
+                      message: connectionMessage,
+                      compact: true,
+                    ),
                   ),
+                  _RoundIconButton(
+                    tooltip: 'Routing',
+                    icon: Icons.route_rounded,
+                    onPressed: onOpenRoutes,
+                    height: 34,
+                    iconSize: 17,
+                  ),
+                  const SizedBox(width: 8),
+                  _RoundIconButton(
+                    tooltip: 'Logs',
+                    icon: Icons.article_outlined,
+                    onPressed: onOpenLogs,
+                    height: 34,
+                    iconSize: 17,
+                  ),
+                  const SizedBox(width: 8),
+                  _RoundIconButton(
+                    tooltip: 'Settings',
+                    icon: Icons.tune_rounded,
+                    onPressed: onOpenSettings,
+                    height: 34,
+                    iconSize: 17,
+                  ),
+                  const SizedBox(width: 8),
+                  _RoundIconButton(
+                    tooltip: themeMode == PohThemeMode.dark
+                        ? 'Light theme'
+                        : 'Dark theme',
+                    icon: themeMode == PohThemeMode.dark
+                        ? Icons.light_mode_rounded
+                        : Icons.dark_mode_rounded,
+                    onPressedAt: onToggleTheme,
+                    height: 34,
+                    iconSize: 17,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            _AppearIn(
+              motionDuration: motionDuration,
+              delay: const Duration(milliseconds: 300),
+              slideOffset: 60.0,
+              child: SizedBox(
+                height: 56,
+                child: _MorphingConnectControl(
+                  compact: true,
+                  phase: activeTab.phase,
+                  progress: progress,
+                  duration: Duration.zero,
+                  onPressed: working ? null : onToggleConnection,
                 ),
-                _RoundIconButton(
-                  tooltip: 'Routing',
-                  icon: Icons.route_rounded,
-                  onPressed: onOpenSettings,
-                ),
-                const SizedBox(width: 8),
-                _RoundIconButton(
-                  tooltip: 'Logs',
-                  icon: Icons.article_outlined,
-                  onPressed: onOpenLogs,
-                ),
-                const SizedBox(width: 8),
-                _RoundIconButton(
-                  tooltip: 'Settings',
-                  icon: Icons.tune_rounded,
-                  onPressed: onOpenSettings,
-                ),
-                const SizedBox(width: 8),
-                _RoundIconButton(
-                  tooltip: themeMode == PohThemeMode.dark
-                      ? 'Light theme'
-                      : 'Dark theme',
-                  icon: themeMode == PohThemeMode.dark
-                      ? Icons.light_mode_rounded
-                      : Icons.dark_mode_rounded,
-                  onPressedAt: onToggleTheme,
-                ),
-              ],
+              ),
             ),
           ],
         ),
@@ -1470,6 +2084,100 @@ class _MorphingConnectControl extends StatelessWidget {
   }
 }
 
+/// Hosts an auxiliary overlay (settings / logs / import) over the main shell.
+/// Expanded mode: a centered card that scales + fades in. Compact mode: a
+/// bottom "sheet" that slides up. In both cases the main shell behind is
+/// progressively blurred and dimmed. The hosted shells keep their own title bar
+/// (with the top-right close), so this only handles placement + the backdrop.
+class _OverlayHost extends StatefulWidget {
+  const _OverlayHost({
+    required this.compact,
+    required this.motion,
+    required this.onDismiss,
+    required this.child,
+  });
+
+  final bool compact;
+  final Duration motion;
+  final VoidCallback onDismiss;
+  final Widget child;
+
+  @override
+  State<_OverlayHost> createState() => _OverlayHostState();
+}
+
+class _OverlayHostState extends State<_OverlayHost>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: widget.motion == Duration.zero
+        ? const Duration(milliseconds: 1)
+        : widget.motion,
+  )..forward();
+  late final Animation<double> _t = CurvedAnimation(
+    parent: _controller,
+    curve: PohMotion.standard,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Expanded keeps the original presentation: a centered card over a plain dim
+    // scrim (no blur, no transform). The blur + slide-up sheet are compact-only.
+    if (!widget.compact) {
+      return Stack(
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: widget.onDismiss,
+              child: ColoredBox(
+                color: Colors.black.withValues(alpha: 0.38),
+              ),
+            ),
+          ),
+          Center(child: widget.child),
+        ],
+      );
+    }
+
+    return AnimatedBuilder(
+      animation: _t,
+      builder: (context, _) {
+        final p = _t.value.clamp(0.0, 1.0);
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: widget.onDismiss,
+                child: ColoredBox(
+                  color: Colors.black.withValues(alpha: 0.38 * p),
+                ),
+              ),
+            ),
+            Align(
+              alignment: Alignment.bottomCenter,
+              child: FractionalTranslation(
+                translation: Offset(0, 1 - p),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                  child: widget.child,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _ServerSidebar extends StatelessWidget {
   const _ServerSidebar({
     required this.activeTab,
@@ -1478,9 +2186,11 @@ class _ServerSidebar extends StatelessWidget {
     required this.profilesLoaded,
     required this.connected,
     required this.onSelectServer,
+    required this.onEditServer,
     required this.onToggleTheme,
     required this.themeMode,
     required this.onOpenSettings,
+    required this.onOpenRoutes,
     required this.onOpenLogs,
     required this.onOpenImportProfile,
     this.compact = false,
@@ -1492,9 +2202,11 @@ class _ServerSidebar extends StatelessWidget {
   final bool profilesLoaded;
   final bool connected;
   final ValueChanged<String> onSelectServer;
+  final ValueChanged<ServerProfile> onEditServer;
   final ValueChanged<Offset> onToggleTheme;
   final PohThemeMode themeMode;
   final VoidCallback onOpenSettings;
+  final VoidCallback onOpenRoutes;
   final VoidCallback onOpenLogs;
   final VoidCallback onOpenImportProfile;
   final bool compact;
@@ -1555,9 +2267,18 @@ class _ServerSidebar extends StatelessWidget {
               connected: connected,
               compact: compact,
               onSelectServer: onSelectServer,
+              onEditServer: onEditServer,
               onOpenImportProfile: onOpenImportProfile,
             ),
           ),
+          if (compact)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+              child: _AddServerButton(
+                compact: compact,
+                onPressed: onOpenImportProfile,
+              ),
+            ),
           if (!compact)
             Padding(
               padding: const EdgeInsets.all(12),
@@ -1567,7 +2288,7 @@ class _ServerSidebar extends StatelessWidget {
                     child: _RoundIconButton(
                       tooltip: 'Routing profiles',
                       icon: Icons.alt_route_rounded,
-                      onPressed: onOpenSettings,
+                      onPressed: onOpenRoutes,
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -1616,6 +2337,7 @@ class _ServerList extends StatelessWidget {
     required this.connected,
     required this.compact,
     required this.onSelectServer,
+    required this.onEditServer,
     required this.onOpenImportProfile,
   });
 
@@ -1626,6 +2348,7 @@ class _ServerList extends StatelessWidget {
   final bool connected;
   final bool compact;
   final ValueChanged<String> onSelectServer;
+  final ValueChanged<ServerProfile> onEditServer;
   final VoidCallback onOpenImportProfile;
 
   @override
@@ -1642,22 +2365,24 @@ class _ServerList extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
         children: [
           const _SidebarMessage(
-            title: 'No servers yet',
-            subtitle: 'Import or add a TrustTunnel profile',
+            title: 'No servers for this core',
+            subtitle: 'Import or add a profile for the active core',
             compact: true,
           ),
-          const SizedBox(height: 10),
-          _AddServerButton(
-            compact: compact,
-            onPressed: onOpenImportProfile,
-          ),
+          if (!compact) ...[
+            const SizedBox(height: 10),
+            _AddServerButton(
+              compact: compact,
+              onPressed: onOpenImportProfile,
+            ),
+          ],
         ],
       );
     }
 
     return ListView.separated(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      itemCount: servers.length + 1,
+      itemCount: servers.length + (compact ? 0 : 1),
       separatorBuilder: (_, __) => const SizedBox(height: 6),
       itemBuilder: (context, index) {
         if (index == servers.length) {
@@ -1673,6 +2398,7 @@ class _ServerList extends StatelessWidget {
           selected: server.id == selectedServer.id,
           connectedHere: connected && server.id == activeTab.selectedServerId,
           onPressed: () => onSelectServer(server.id),
+          onEdit: () => onEditServer(server),
         );
       },
     );
@@ -1731,12 +2457,14 @@ class _ServerCard extends StatelessWidget {
     required this.selected,
     required this.connectedHere,
     required this.onPressed,
+    required this.onEdit,
   });
 
   final ServerProfile server;
   final bool selected;
   final bool connectedHere;
   final VoidCallback onPressed;
+  final VoidCallback onEdit;
 
   @override
   Widget build(BuildContext context) {
@@ -1773,6 +2501,7 @@ class _ServerCard extends StatelessWidget {
                         Flexible(
                           child: Text(
                             server.name,
+                            maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
                               color: palette.text,
@@ -1797,6 +2526,7 @@ class _ServerCard extends StatelessWidget {
                     const SizedBox(height: 2),
                     Text(
                       server.host,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: palette.muted,
@@ -1812,7 +2542,28 @@ class _ServerCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              _PingLoad(server: server),
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _PingLoad(server: server),
+                  const SizedBox(height: 6),
+                  Tooltip(
+                    message: 'Edit server',
+                    child: InkWell(
+                      customBorder: const CircleBorder(),
+                      onTap: onEdit,
+                      child: Padding(
+                        padding: const EdgeInsets.all(4),
+                        child: Icon(
+                          Icons.settings_rounded,
+                          color: palette.muted,
+                          size: 15,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
@@ -1823,14 +2574,18 @@ class _ServerCard extends StatelessWidget {
 
 class _CoreMenu extends StatelessWidget {
   const _CoreMenu({
+    required this.cores,
     required this.activeCoreId,
     required this.openTabs,
     required this.onAddCore,
+    required this.onInstallCore,
   });
 
+  final List<CoreSpec> cores;
   final String activeCoreId;
   final List<SessionTab> openTabs;
   final ValueChanged<String> onAddCore;
+  final ValueChanged<String> onInstallCore;
 
   @override
   Widget build(BuildContext context) {
@@ -1870,12 +2625,14 @@ class _CoreMenu extends StatelessWidget {
                 ),
               ),
             ),
-            for (final core in coreSpecs)
+            for (final core in cores)
               _CoreMenuItem(
                 core: core,
                 isOpen: openCoreIds.contains(core.id),
                 isActive: core.id == activeCoreId,
                 onPressed: () => onAddCore(core.id),
+                onInstall:
+                    core.installable ? () => onInstallCore(core.id) : null,
               ),
           ],
         ),
@@ -1890,17 +2647,25 @@ class _CoreMenuItem extends StatelessWidget {
     required this.isOpen,
     required this.isActive,
     required this.onPressed,
+    this.onInstall,
   });
 
   final CoreSpec core;
   final bool isOpen;
   final bool isActive;
   final VoidCallback onPressed;
+  final VoidCallback? onInstall;
 
   @override
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
-    final disabled = core.status != CoreStatus.active && !isOpen;
+    final canOpen = core.status == CoreStatus.active || isOpen;
+    final canInstall = onInstall != null && !core.installing;
+    final tap = canOpen
+        ? onPressed
+        : canInstall
+            ? onInstall
+            : null;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
       child: Material(
@@ -1908,9 +2673,9 @@ class _CoreMenuItem extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         child: InkWell(
           borderRadius: BorderRadius.circular(12),
-          onTap: disabled ? null : onPressed,
+          onTap: tap,
           child: Opacity(
-            opacity: disabled ? 0.52 : 1,
+            opacity: (tap == null && !core.installing) ? 0.52 : 1,
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
               child: Row(
@@ -1941,16 +2706,7 @@ class _CoreMenuItem extends StatelessWidget {
                       ],
                     ),
                   ),
-                  Text(
-                    core.status == CoreStatus.active ? 'Open' : 'Soon',
-                    style: TextStyle(
-                      color: core.status == CoreStatus.active
-                          ? palette.accent
-                          : palette.muted,
-                      fontSize: 10,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
+                  _coreAction(palette),
                 ],
               ),
             ),
@@ -1959,13 +2715,61 @@ class _CoreMenuItem extends StatelessWidget {
       ),
     );
   }
+
+  Widget _coreAction(PohPalette palette) {
+    if (core.installing) {
+      return SizedBox(
+        width: 14,
+        height: 14,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          color: palette.accent,
+        ),
+      );
+    }
+    if (core.status == CoreStatus.active) {
+      return Text(
+        'Open',
+        style: TextStyle(
+          color: palette.accent,
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+        ),
+      );
+    }
+    if (core.installable) {
+      return Text(
+        'Install',
+        style: TextStyle(
+          color: palette.accent.withValues(alpha: 0.8),
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+        ),
+      );
+    }
+    return Text(
+      'Soon',
+      style: TextStyle(
+        color: palette.muted,
+        fontSize: 10,
+        fontWeight: FontWeight.w800,
+      ),
+    );
+  }
 }
 
 class _DetailBar extends StatelessWidget {
-  const _DetailBar({required this.core, required this.server});
+  const _DetailBar({
+    required this.core,
+    required this.server,
+    required this.activeRoute,
+    required this.onOpenRoutes,
+  });
 
   final CoreSpec core;
   final ServerProfile server;
+  final String activeRoute;
+  final VoidCallback onOpenRoutes;
 
   @override
   Widget build(BuildContext context) {
@@ -1973,7 +2777,10 @@ class _DetailBar extends StatelessWidget {
 
     final pills = <Widget>[
       _DetailPill(label: 'PROTOCOL', value: core.protocol),
-      _DetailPill(label: 'PING', value: '${server.pingMs} ms'),
+      _DetailPill(
+        label: 'PING',
+        value: server.pingMs <= 0 ? '-' : '${server.pingMs} ms',
+      ),
       const _DetailPill(label: 'SESSION', value: '-'),
     ];
 
@@ -1990,29 +2797,39 @@ class _DetailBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
-          Container(
-            width: 128,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-            decoration: BoxDecoration(
-              color: palette.input,
+          Material(
+            color: palette.input,
+            borderRadius: BorderRadius.circular(10),
+            child: InkWell(
               borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: palette.border),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Default',
-                    style: TextStyle(
-                      color: palette.text,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
+              onTap: onOpenRoutes,
+              child: Container(
+                width: 148,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: palette.border),
                 ),
-                Icon(Icons.keyboard_arrow_down_rounded,
-                    color: palette.muted, size: 18),
-              ],
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        activeRoute,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: palette.text,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    Icon(Icons.keyboard_arrow_down_rounded,
+                        color: palette.muted, size: 18),
+                  ],
+                ),
+              ),
             ),
           ),
         ],
@@ -2159,12 +2976,16 @@ class _ConnectionStatus extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 7),
-            Text(
-              phaseLabel(phase),
-              style: TextStyle(
-                color: palette.text,
-                fontSize: compact ? 20 : 22,
-                fontWeight: FontWeight.w900,
+            Flexible(
+              child: Text(
+                phaseLabel(phase),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: palette.text,
+                  fontSize: compact ? 18 : 22,
+                  fontWeight: FontWeight.w900,
+                ),
               ),
             ),
           ],
@@ -2179,8 +3000,10 @@ class _ConnectionStatus extends StatelessWidget {
                       : 'Setting up secure channel'),
           style: TextStyle(
             color: palette.muted,
-            fontSize: compact ? 12 : 13,
+            fontSize: compact ? 11.5 : 13,
           ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
         ),
       ],
     );
@@ -2202,6 +3025,9 @@ class _ServerStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
+    final subtitle = server.city.trim().isEmpty
+        ? server.host
+        : '${server.city} - ${server.host}';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
@@ -2226,6 +3052,8 @@ class _ServerStrip extends StatelessWidget {
               children: [
                 Text(
                   server.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: palette.text,
                     fontWeight: FontWeight.w900,
@@ -2234,7 +3062,8 @@ class _ServerStrip extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  '${server.city} - ${server.host}',
+                  subtitle,
+                  maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: palette.muted,
@@ -2282,6 +3111,7 @@ class _DockServerCard extends StatelessWidget {
               children: [
                 Text(
                   server.name,
+                  maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: palette.text,
@@ -2291,6 +3121,7 @@ class _DockServerCard extends StatelessWidget {
                 ),
                 Text(
                   '${server.host} - ${core.protocol}',
+                  maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(color: palette.muted, fontSize: 11.5),
                 ),
@@ -2477,6 +3308,40 @@ class _PingLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = PohPalette.of(context);
+    if (pingMs <= 0) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 7,
+            height: 7,
+            decoration: BoxDecoration(
+              color: palette.muted.withValues(alpha: 0.55),
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 5),
+          Text(
+            '-',
+            style: TextStyle(
+              color: palette.muted,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(width: 2),
+          Text(
+            'ms',
+            style: TextStyle(
+              color: palette.muted,
+              fontSize: 10,
+            ),
+          ),
+        ],
+      );
+    }
+
     final color = pingMs < 35
         ? const Color(0xFF3A9B6E)
         : pingMs < 60
@@ -2514,11 +3379,13 @@ class _PingLabel extends StatelessWidget {
 
 class _CoreTabButton extends StatelessWidget {
   const _CoreTabButton({
+    required this.core,
     required this.tab,
     required this.active,
     required this.onPressed,
   });
 
+  final CoreSpec core;
   final SessionTab tab;
   final bool active;
   final VoidCallback onPressed;
@@ -2526,7 +3393,6 @@ class _CoreTabButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
-    final core = findCore(tab.coreId);
     return Padding(
       padding: const EdgeInsets.only(right: 4),
       child: Transform.translate(
@@ -2543,17 +3409,15 @@ class _CoreTabButton extends StatelessWidget {
               decoration: BoxDecoration(
                 borderRadius:
                     const BorderRadius.vertical(top: Radius.circular(10)),
-                border: Border(
-                  top: BorderSide(
-                      color: active ? palette.border : Colors.transparent),
-                  left: BorderSide(
-                      color: active ? palette.border : Colors.transparent),
-                  right: BorderSide(
-                      color: active ? palette.border : Colors.transparent),
-                  bottom: BorderSide(
-                    color: active ? palette.surface : Colors.transparent,
-                  ),
-                ),
+                border: active
+                    ? Border(
+                        top: BorderSide(color: palette.border),
+                        left: BorderSide(color: palette.border),
+                        right: BorderSide(color: palette.border),
+                        // No bottom border — the tab "sits" on the content container line
+                        bottom: BorderSide(color: palette.surface, width: 1),
+                      )
+                    : Border.all(color: Colors.transparent),
                 boxShadow: active
                     ? [
                         BoxShadow(
@@ -2716,12 +3580,16 @@ class _RoundIconButton extends StatelessWidget {
     required this.icon,
     this.onPressed,
     this.onPressedAt,
+    this.height = 36,
+    this.iconSize = 18,
   }) : assert(onPressed != null || onPressedAt != null);
 
   final String tooltip;
   final IconData icon;
   final VoidCallback? onPressed;
   final ValueChanged<Offset>? onPressedAt;
+  final double height;
+  final double iconSize;
 
   @override
   Widget build(BuildContext context) {
@@ -2738,13 +3606,14 @@ class _RoundIconButton extends StatelessWidget {
               ? null
               : (details) => onPressedAt!(details.globalPosition),
           child: Container(
-            height: 36,
+            height: height,
+            constraints: BoxConstraints(minWidth: height),
             alignment: Alignment.center,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(10),
               border: Border.all(color: palette.border),
             ),
-            child: Icon(icon, color: palette.text, size: 18),
+            child: Icon(icon, color: palette.text, size: iconSize),
           ),
         ),
       ),

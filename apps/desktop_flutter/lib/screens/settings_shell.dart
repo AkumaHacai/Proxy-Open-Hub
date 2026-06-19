@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../services/app_settings_store.dart';
@@ -14,12 +16,12 @@ class SettingsShell extends StatefulWidget {
     super.key,
     required this.themeMode,
     required this.accent,
+    required this.accentFollowsCore,
     required this.animationsEnabled,
     required this.animationDurationMs,
     required this.density,
     required this.startupMode,
     required this.defaultCore,
-    required this.defaultRoute,
     required this.autoConnect,
     required this.socksLan,
     required this.socksAddress,
@@ -30,12 +32,12 @@ class SettingsShell extends StatefulWidget {
     required this.timeoutSeconds,
     required this.onThemeModeChanged,
     required this.onAccentChanged,
+    required this.onAccentFollowsCoreChanged,
     required this.onAnimationsEnabledChanged,
     required this.onAnimationDurationChanged,
     required this.onDensityChanged,
     required this.onStartupModeChanged,
     required this.onDefaultCoreChanged,
-    required this.onDefaultRouteChanged,
     required this.onAutoConnectChanged,
     required this.onSocksLanChanged,
     required this.onSocksAddressChanged,
@@ -51,12 +53,12 @@ class SettingsShell extends StatefulWidget {
 
   final PohThemeMode themeMode;
   final PohAccent accent;
+  final bool accentFollowsCore;
   final bool animationsEnabled;
   final int animationDurationMs;
   final String density;
   final String startupMode;
   final String defaultCore;
-  final String defaultRoute;
   final bool autoConnect;
   final bool socksLan;
   final String socksAddress;
@@ -67,12 +69,12 @@ class SettingsShell extends StatefulWidget {
   final int timeoutSeconds;
   final ThemeModeChangedAt onThemeModeChanged;
   final ValueChanged<PohAccent> onAccentChanged;
+  final ValueChanged<bool> onAccentFollowsCoreChanged;
   final ValueChanged<bool> onAnimationsEnabledChanged;
   final ValueChanged<int> onAnimationDurationChanged;
   final ValueChanged<String> onDensityChanged;
   final ValueChanged<String> onStartupModeChanged;
   final ValueChanged<String> onDefaultCoreChanged;
-  final ValueChanged<String> onDefaultRouteChanged;
   final ValueChanged<bool> onAutoConnectChanged;
   final ValueChanged<bool> onSocksLanChanged;
   final ValueChanged<String> onSocksAddressChanged;
@@ -95,48 +97,67 @@ class _SettingsShellState extends State<SettingsShell> {
   @override
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
-    return Container(
-      width: 760,
-      height: 600,
-      decoration: BoxDecoration(
-        color: palette.background,
-        borderRadius: BorderRadius.circular(26),
-        border: Border.all(color: palette.border),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.28),
-            blurRadius: 42,
-            offset: const Offset(0, 18),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // The shell is hosted in a Center() that caps it at the window size, so
+        // size to the room we actually have instead of a fixed 760x600 that the
+        // compact window would otherwise crush into a one-letter-per-line mess.
+        final maxW =
+            constraints.maxWidth.isFinite ? constraints.maxWidth : 760.0;
+        final maxH =
+            constraints.maxHeight.isFinite ? constraints.maxHeight : 600.0;
+        final width = math.min(780.0, maxW);
+        final height = math.min(620.0, maxH);
+        // Below this the side rail no longer fits; switch to horizontal top tabs.
+        final railCompact = width < 660;
+        final pagePadding = railCompact ? 18.0 : 28.0;
+
+        void onSelect(SettingsPageId value) => setState(() => _active = value);
+        final content = _SettingsContentScroll(
+          padding: EdgeInsets.fromLTRB(pagePadding, 26, pagePadding, 30),
+          child: _buildPage(),
+        );
+
+        return Container(
+          width: width,
+          height: height,
+          decoration: BoxDecoration(
+            color: palette.background,
+            borderRadius: BorderRadius.circular(26),
+            border: Border.all(color: palette.border),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.28),
+                blurRadius: 42,
+                offset: const Offset(0, 18),
+              ),
+            ],
           ),
-        ],
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        children: [
-          _SettingsTitleBar(onClose: widget.onClose),
-          Expanded(
-            child: Row(
-              children: [
-                _SettingsNav(
-                  active: _active,
-                  onChanged: (value) => setState(() => _active = value),
-                ),
-                Expanded(
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(30, 26, 30, 30),
-                    child: _buildPage(),
-                  ),
-                ),
-              ],
-            ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            children: [
+              _SettingsTitleBar(onClose: widget.onClose),
+              if (railCompact)
+                _SettingsTopTabs(active: _active, onChanged: onSelect),
+              Expanded(
+                child: railCompact
+                    ? content
+                    : Row(
+                        children: [
+                          _SettingsNav(active: _active, onChanged: onSelect),
+                          Expanded(child: content),
+                        ],
+                      ),
+              ),
+              _SettingsFooter(
+                onReset: _reset,
+                onSave: widget.onSave,
+                onClose: widget.onClose,
+              ),
+            ],
           ),
-          _SettingsFooter(
-            onReset: _reset,
-            onSave: widget.onSave,
-            onClose: widget.onClose,
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -145,12 +166,14 @@ class _SettingsShellState extends State<SettingsShell> {
       SettingsPageId.appearance => _AppearancePage(
           themeMode: widget.themeMode,
           accent: widget.accent,
+          accentFollowsCore: widget.accentFollowsCore,
           animationsEnabled: widget.animationsEnabled,
           animationDurationMs: widget.animationDurationMs,
           density: widget.density,
           startupMode: widget.startupMode,
           onThemeModeChanged: widget.onThemeModeChanged,
           onAccentChanged: widget.onAccentChanged,
+          onAccentFollowsCoreChanged: widget.onAccentFollowsCoreChanged,
           onAnimationsEnabledChanged: widget.onAnimationsEnabledChanged,
           onAnimationDurationChanged: widget.onAnimationDurationChanged,
           onDensityChanged: widget.onDensityChanged,
@@ -158,10 +181,8 @@ class _SettingsShellState extends State<SettingsShell> {
         ),
       SettingsPageId.connection => _ConnectionPage(
           defaultCore: widget.defaultCore,
-          defaultRoute: widget.defaultRoute,
           autoConnect: widget.autoConnect,
           onDefaultCoreChanged: widget.onDefaultCoreChanged,
-          onDefaultRouteChanged: widget.onDefaultRouteChanged,
           onAutoConnectChanged: widget.onAutoConnectChanged,
         ),
       SettingsPageId.proxy => _ProxyPage(
@@ -199,63 +220,67 @@ class _SettingsTitleBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
-    return Container(
-      height: 52,
-      padding: const EdgeInsets.symmetric(horizontal: 18),
-      decoration: BoxDecoration(
-        color: palette.surface,
-        border: Border(bottom: BorderSide(color: palette.border)),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 26,
-            height: 26,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: palette.accent,
-              borderRadius: BorderRadius.circular(9),
-              boxShadow: [
-                BoxShadow(
-                  color: palette.accentSoft,
-                  spreadRadius: 4,
-                  blurRadius: 0,
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onPanStart: (_) => WindowControls.startDrag(),
+      child: Container(
+        height: 52,
+        padding: const EdgeInsets.symmetric(horizontal: 18),
+        decoration: BoxDecoration(
+          color: palette.surface,
+          border: Border(bottom: BorderSide(color: palette.border)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 26,
+              height: 26,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: palette.accent,
+                borderRadius: BorderRadius.circular(9),
+                boxShadow: [
+                  BoxShadow(
+                    color: palette.accentSoft,
+                    spreadRadius: 4,
+                    blurRadius: 0,
+                  ),
+                ],
+              ),
+              child: const Text(
+                'C',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
                 ),
-              ],
+              ),
             ),
-            child: const Text(
-              'C',
+            const SizedBox(width: 11),
+            Text(
+              'Settings',
               style: TextStyle(
-                color: Colors.white,
+                color: palette.text,
+                fontSize: 15,
                 fontWeight: FontWeight.w900,
               ),
             ),
-          ),
-          const SizedBox(width: 11),
-          Text(
-            'Settings',
-            style: TextStyle(
-              color: palette.text,
-              fontSize: 15,
-              fontWeight: FontWeight.w900,
+            const Spacer(),
+            IconButton(
+              tooltip: 'Minimize',
+              visualDensity: VisualDensity.compact,
+              color: palette.muted,
+              onPressed: WindowControls.minimize,
+              icon: const Icon(Icons.remove_rounded, size: 18),
             ),
-          ),
-          const Spacer(),
-          IconButton(
-            tooltip: 'Minimize',
-            visualDensity: VisualDensity.compact,
-            color: palette.muted,
-            onPressed: WindowControls.minimize,
-            icon: const Icon(Icons.remove_rounded, size: 18),
-          ),
-          IconButton(
-            tooltip: 'Close',
-            visualDensity: VisualDensity.compact,
-            color: palette.muted,
-            onPressed: onClose,
-            icon: const Icon(Icons.close_rounded, size: 18),
-          ),
-        ],
+            IconButton(
+              tooltip: 'Close',
+              visualDensity: VisualDensity.compact,
+              color: palette.muted,
+              onPressed: onClose,
+              icon: const Icon(Icons.close_rounded, size: 18),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -271,7 +296,7 @@ class _SettingsNav extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
     return Container(
-      width: 210,
+      width: 194,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: palette.surface,
@@ -279,42 +304,146 @@ class _SettingsNav extends StatelessWidget {
       ),
       child: Column(
         children: [
-          _NavButton(
-            id: SettingsPageId.appearance,
-            active: active,
-            icon: Icons.language_rounded,
-            label: 'Appearance',
-            onChanged: onChanged,
-          ),
-          _NavButton(
-            id: SettingsPageId.connection,
-            active: active,
-            icon: Icons.power_settings_new_rounded,
-            label: 'Connection',
-            onChanged: onChanged,
-          ),
-          _NavButton(
-            id: SettingsPageId.proxy,
-            active: active,
-            icon: Icons.alt_route_rounded,
-            label: 'Proxy',
-            onChanged: onChanged,
-          ),
-          _NavButton(
-            id: SettingsPageId.diagnostics,
-            active: active,
-            icon: Icons.article_outlined,
-            label: 'Diagnostics',
-            onChanged: onChanged,
-          ),
-          _NavButton(
-            id: SettingsPageId.about,
-            active: active,
-            icon: Icons.info_outline_rounded,
-            label: 'About',
-            onChanged: onChanged,
-          ),
+          for (final (id, icon, label) in _settingsTabs)
+            _NavButton(
+              id: id,
+              active: active,
+              icon: icon,
+              label: label,
+              onChanged: onChanged,
+            ),
         ],
+      ),
+    );
+  }
+}
+
+class _SettingsContentScroll extends StatefulWidget {
+  const _SettingsContentScroll({
+    required this.padding,
+    required this.child,
+  });
+
+  final EdgeInsetsGeometry padding;
+  final Widget child;
+
+  @override
+  State<_SettingsContentScroll> createState() => _SettingsContentScrollState();
+}
+
+class _SettingsContentScrollState extends State<_SettingsContentScroll> {
+  final _controller = ScrollController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scrollbar(
+      controller: _controller,
+      thumbVisibility: true,
+      child: SingleChildScrollView(
+        controller: _controller,
+        padding: widget.padding,
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+/// Single source of truth for the settings sections (used by the side rail and
+/// the compact top tabs).
+const List<(SettingsPageId, IconData, String)> _settingsTabs = [
+  (SettingsPageId.appearance, Icons.language_rounded, 'Appearance'),
+  (SettingsPageId.connection, Icons.power_settings_new_rounded, 'Connection'),
+  (SettingsPageId.proxy, Icons.lan_rounded, 'Proxy'),
+  (SettingsPageId.diagnostics, Icons.article_outlined, 'Diagnostics'),
+  (SettingsPageId.about, Icons.info_outline_rounded, 'About'),
+];
+
+class _SettingsTopTabs extends StatelessWidget {
+  const _SettingsTopTabs({required this.active, required this.onChanged});
+
+  final SettingsPageId active;
+  final ValueChanged<SettingsPageId> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = PohPalette.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        color: palette.surface,
+        border: Border(bottom: BorderSide(color: palette.border)),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        child: Row(
+          children: [
+            for (final (id, icon, label) in _settingsTabs)
+              _TopTab(
+                id: id,
+                active: active,
+                icon: icon,
+                label: label,
+                onChanged: onChanged,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TopTab extends StatelessWidget {
+  const _TopTab({
+    required this.id,
+    required this.active,
+    required this.icon,
+    required this.label,
+    required this.onChanged,
+  });
+
+  final SettingsPageId id;
+  final SettingsPageId active;
+  final IconData icon;
+  final String label;
+  final ValueChanged<SettingsPageId> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = PohPalette.of(context);
+    final selected = id == active;
+    final color = selected ? palette.accent : palette.muted;
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: Material(
+        color: selected ? palette.accentSoft : Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: () => onChanged(id),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
+            child: Row(
+              children: [
+                Icon(icon, size: 16, color: color),
+                const SizedBox(width: 8),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: color,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -339,6 +468,7 @@ class _NavButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
     final selected = id == active;
+    final iconColor = selected ? palette.accent : palette.muted;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
       child: Material(
@@ -351,15 +481,19 @@ class _NavButton extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
             child: Row(
               children: [
-                Icon(icon,
-                    size: 18, color: selected ? palette.accent : palette.muted),
+                Icon(icon, size: 18, color: iconColor),
                 const SizedBox(width: 11),
-                Text(
-                  label,
-                  style: TextStyle(
-                    color: selected ? palette.accent : palette.muted,
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w800,
+                Flexible(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    softWrap: false,
+                    style: TextStyle(
+                      color: iconColor,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w800,
+                    ),
                   ),
                 ),
               ],
@@ -375,12 +509,14 @@ class _AppearancePage extends StatelessWidget {
   const _AppearancePage({
     required this.themeMode,
     required this.accent,
+    required this.accentFollowsCore,
     required this.animationsEnabled,
     required this.animationDurationMs,
     required this.density,
     required this.startupMode,
     required this.onThemeModeChanged,
     required this.onAccentChanged,
+    required this.onAccentFollowsCoreChanged,
     required this.onAnimationsEnabledChanged,
     required this.onAnimationDurationChanged,
     required this.onDensityChanged,
@@ -389,12 +525,14 @@ class _AppearancePage extends StatelessWidget {
 
   final PohThemeMode themeMode;
   final PohAccent accent;
+  final bool accentFollowsCore;
   final bool animationsEnabled;
   final int animationDurationMs;
   final String density;
   final String startupMode;
   final ThemeModeChangedAt onThemeModeChanged;
   final ValueChanged<PohAccent> onAccentChanged;
+  final ValueChanged<bool> onAccentFollowsCoreChanged;
   final ValueChanged<bool> onAnimationsEnabledChanged;
   final ValueChanged<int> onAnimationDurationChanged;
   final ValueChanged<String> onDensityChanged;
@@ -422,8 +560,19 @@ class _AppearancePage extends StatelessWidget {
             ),
             _DividerLine(),
             _Field(
+              label: 'Accent follows core',
+              hint: 'Window accent follows the active core',
+              control: _Switch(
+                value: accentFollowsCore,
+                onChanged: onAccentFollowsCoreChanged,
+              ),
+            ),
+            _DividerLine(),
+            _Field(
               label: 'Accent color',
-              hint: 'Used for buttons, ring and selection',
+              hint: accentFollowsCore
+                  ? 'Manual override turns core following off'
+                  : 'Used for buttons, ring and selection',
               control: _AccentSwatches(
                 value: accent,
                 onChanged: onAccentChanged,
@@ -492,18 +641,14 @@ class _AppearancePage extends StatelessWidget {
 class _ConnectionPage extends StatelessWidget {
   const _ConnectionPage({
     required this.defaultCore,
-    required this.defaultRoute,
     required this.autoConnect,
     required this.onDefaultCoreChanged,
-    required this.onDefaultRouteChanged,
     required this.onAutoConnectChanged,
   });
 
   final String defaultCore;
-  final String defaultRoute;
   final bool autoConnect;
   final ValueChanged<String> onDefaultCoreChanged;
-  final ValueChanged<String> onDefaultRouteChanged;
   final ValueChanged<bool> onAutoConnectChanged;
 
   @override
@@ -521,16 +666,6 @@ class _ConnectionPage extends StatelessWidget {
                 value: defaultCore,
                 values: const ['TrustTunnel', 'sing-box', 'NaiveProxy'],
                 onChanged: onDefaultCoreChanged,
-              ),
-            ),
-            _DividerLine(),
-            _Field(
-              label: 'Default route',
-              hint: 'Traffic routing preset',
-              control: _Select(
-                value: defaultRoute,
-                values: const ['Default', 'Local bypass', 'Selective'],
-                onChanged: onDefaultRouteChanged,
               ),
             ),
           ],
@@ -837,33 +972,67 @@ class _Field extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
+    final labelBlock = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            color: palette.text,
+            fontSize: 14,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          hint,
+          style: TextStyle(color: palette.muted, fontSize: 12),
+        ),
+      ],
+    );
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 15),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
+      child: LayoutBuilder(
+        builder: (context, c) {
+          // Below this width the label and the control no longer fit side by
+          // side; stack them so a fixed-width control can never squeeze the
+          // label down to one letter per line (the compact-mode bug).
+          final stacked = c.maxWidth < 460;
+          if (stacked) {
+            return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  label,
-                  style: TextStyle(
-                    color: palette.text,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w900,
+                labelBlock,
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxWidth: math.min(340, c.maxWidth),
+                    ),
+                    child: control,
                   ),
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  hint,
-                  style: TextStyle(color: palette.muted, fontSize: 12),
-                ),
               ],
-            ),
-          ),
-          const SizedBox(width: 20),
-          control,
-        ],
+            );
+          }
+          return Row(
+            children: [
+              Expanded(child: labelBlock),
+              const SizedBox(width: 20),
+              Flexible(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 300),
+                    child: control,
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -902,8 +1071,11 @@ class _Segmented<T> extends StatelessWidget {
         color: palette.subtle,
         borderRadius: BorderRadius.circular(10),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
+      // Wrap (not Row) so the pills flow onto a second line at very narrow
+      // widths instead of overflowing the available space.
+      child: Wrap(
+        spacing: 3,
+        runSpacing: 3,
         children: [
           for (final entry in values.entries)
             Material(
@@ -948,8 +1120,8 @@ class _AccentSwatches extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
-    return Row(
-      mainAxisSize: MainAxisSize.min,
+    return Wrap(
+      runSpacing: 9,
       children: [
         for (final accent in PohAccent.values)
           Padding(
@@ -1020,29 +1192,32 @@ class _Select extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
-    return Container(
-      width: 190,
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: palette.input,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: palette.border),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
-          value: value,
-          isExpanded: true,
-          dropdownColor: palette.surface,
-          style: TextStyle(color: palette.text, fontWeight: FontWeight.w700),
-          items: [
-            for (final item in values)
-              DropdownMenuItem(value: item, child: Text(item)),
-          ],
-          onChanged: (value) {
-            if (value != null) {
-              onChanged(value);
-            }
-          },
+    return SizedBox(
+      width: double.infinity,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 260),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: palette.input,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: palette.border),
+        ),
+        child: DropdownButtonHideUnderline(
+          child: DropdownButton<String>(
+            value: value,
+            isExpanded: true,
+            dropdownColor: palette.surface,
+            style: TextStyle(color: palette.text, fontWeight: FontWeight.w700),
+            items: [
+              for (final item in values)
+                DropdownMenuItem(value: item, child: Text(item)),
+            ],
+            onChanged: (value) {
+              if (value != null) {
+                onChanged(value);
+              }
+            },
+          ),
         ),
       ),
     );
@@ -1064,7 +1239,7 @@ class _Input extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
     return SizedBox(
-      width: 260,
+      width: double.infinity,
       child: TextFormField(
         initialValue: value,
         enabled: enabled,
@@ -1148,7 +1323,7 @@ class _AnimationSpeedSlider extends StatelessWidget {
     final palette = PohPalette.of(context);
     final activeColor = enabled ? palette.accent : palette.muted;
     return SizedBox(
-      width: 260,
+      width: double.infinity,
       child: Row(
         children: [
           Expanded(
