@@ -45,7 +45,8 @@ class ProxyOpenHubApp extends StatefulWidget {
   State<ProxyOpenHubApp> createState() => _ProxyOpenHubAppState();
 }
 
-class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
+class _ProxyOpenHubAppState extends State<ProxyOpenHubApp>
+    with WidgetsBindingObserver {
   var _themeMode = PohThemeMode.dark;
   var _accent = PohAccent.forest;
   var _accentFollowsCore = true;
@@ -204,10 +205,22 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadSettings();
     _loadCoreCatalog();
     _loadProfiles();
     _applyDebugOverlay();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.detached) {
+      final supervisor = _supervisorSession;
+      if (supervisor != null) {
+        _supervisorSession = null;
+        unawaited(supervisor.stop());
+      }
+    }
   }
 
   void _applyDebugOverlay() {
@@ -244,8 +257,14 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _clearTimers();
     _stopTraffic();
+    // Fire-and-forget stop so the supervisor gets the command before the pipe
+    // closes on process exit. Belt-and-suspenders: pipe closure is sufficient on
+    // its own, but sending the stop command first enables an orderly teardown.
+    _supervisorSession?.stop();
+    _supervisorSession = null;
     super.dispose();
   }
 
@@ -774,6 +793,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
     });
     _clearTimers();
     _stopTraffic();
+    _startSessionStatusPolling(); // F3: restart idle discovery
   }
 
   void _editServer(ServerProfile server) {
@@ -920,6 +940,14 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
         return;
       }
 
+      // F2: if another session is already running, adopt it instead of showing
+      // an error. The user can then Disconnect to stop it, or keep using it.
+      if (error is BackendSessionException &&
+          error.message.contains('already running')) {
+        unawaited(_tryAdoptSession(id));
+        return;
+      }
+
       _patchTab(id, phase: ConnectionPhase.idle, clearConnectedAt: true);
       setState(() {
         _connectionMessage = error.toString();
@@ -927,6 +955,36 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
         _download = List<double>.filled(16, 0);
         _upload = List<double>.filled(16, 0);
       });
+    }
+  }
+
+  /// F2: adopt a running session when [_connect] gets SessionAlreadyRunning.
+  Future<void> _tryAdoptSession(int tabId) async {
+    try {
+      final status = await _backendSessionService.sessionStatus();
+      if (!mounted) return;
+      if (status.running && status.session != null) {
+        _adoptSession(status.session!);
+      } else {
+        _patchTab(tabId, phase: ConnectionPhase.idle, clearConnectedAt: true);
+        setState(() {
+          _connectionMessage = 'Connection conflict: no active session found';
+          _progress = 0;
+          _download = List<double>.filled(16, 0);
+          _upload = List<double>.filled(16, 0);
+        });
+        _startSessionStatusPolling();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      _patchTab(tabId, phase: ConnectionPhase.idle, clearConnectedAt: true);
+      setState(() {
+        _connectionMessage = e.toString();
+        _progress = 0;
+        _download = List<double>.filled(16, 0);
+        _upload = List<double>.filled(16, 0);
+      });
+      _startSessionStatusPolling();
     }
   }
 
@@ -959,6 +1017,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
         _upload = List<double>.filled(16, 0);
       });
       _stopTraffic();
+      _startSessionStatusPolling(); // F3: restart idle discovery after disconnect
     } catch (error) {
       if (!mounted || id != _activeTabId) {
         return;
@@ -998,6 +1057,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
         _download = List<double>.filled(16, 0);
         _upload = List<double>.filled(16, 0);
       });
+      _startSessionStatusPolling(); // F3: restart idle discovery
     }
   }
 
@@ -1016,6 +1076,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
         _download = List<double>.filled(16, 0);
         _upload = List<double>.filled(16, 0);
       });
+      _startSessionStatusPolling(); // F3: restart idle discovery
     }
   }
 
@@ -1081,30 +1142,38 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
     _sessionStatusInFlight = false;
   }
 
+  // F3: polls status when connected (safety net for core crash) AND when
+  // disconnected (catches external/orphaned sessions for reattach).
   void _startSessionStatusPolling() {
     _sessionStatusTimer?.cancel();
-    _sessionStatusTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-      if (!_connected || !mounted || _sessionStatusInFlight) {
-        return;
-      }
+    _sessionStatusTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+      if (!mounted || _sessionStatusInFlight) return;
 
       _sessionStatusInFlight = true;
       try {
         final status = await _backendSessionService.sessionStatus();
-        if (!mounted || !_connected || status.running) {
-          return;
-        }
+        if (!mounted) return;
 
-        _clearTimers();
-        _stopTraffic();
-        _patchTab(_activeTabId,
-            phase: ConnectionPhase.idle, clearConnectedAt: true);
-        setState(() {
-          _connectionMessage = '${_activeCore.name} core exited';
-          _progress = 0;
-          _download = List<double>.filled(16, 0);
-          _upload = List<double>.filled(16, 0);
-        });
+        if (_connected && !status.running) {
+          // Core exited while GUI thought we were connected.
+          _clearTimers();
+          _stopTraffic();
+          _patchTab(_activeTabId,
+              phase: ConnectionPhase.idle, clearConnectedAt: true);
+          setState(() {
+            _connectionMessage = '${_activeCore.name} core exited';
+            _progress = 0;
+            _download = List<double>.filled(16, 0);
+            _upload = List<double>.filled(16, 0);
+          });
+          _startSessionStatusPolling(); // restart for idle discovery
+        } else if (!_connected &&
+            !_working &&
+            status.running &&
+            status.session != null) {
+          // External/orphaned session detected — adopt it.
+          _adoptSession(status.session!);
+        }
       } catch (error) {
         if (mounted && _connected) {
           setState(() => _connectionMessage = error.toString());
@@ -1155,6 +1224,69 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp> {
             : _DesktopOverlay.editProfile;
       }
     });
+
+    // F1: reattach to any already-running session.
+    await _checkExistingSession();
+
+    // F3: start idle discovery polling if we didn't reattach.
+    if (mounted && !_connected && !_working) {
+      _startSessionStatusPolling();
+    }
+  }
+
+  /// F1: on startup, query session status and adopt a running session so the GUI
+  /// shows Connected immediately rather than requiring a manual Connect.
+  Future<void> _checkExistingSession() async {
+    try {
+      final status = await _backendSessionService.sessionStatus();
+      if (!mounted) return;
+      if (status.running && status.session != null) {
+        _adoptSession(status.session!);
+      }
+    } catch (_) {
+      // poh_cli not found or session query failed — not a startup-blocking error.
+    }
+  }
+
+  /// F1/F2/F3/F6: transition the GUI to Connected using data from an existing
+  /// (possibly orphaned) session.  [_supervisorSession] is intentionally null —
+  /// Disconnect will go through [stopSession()] instead.
+  ///
+  /// Rust's [desktop_session_status] already verified [creation_time_100ns], so
+  /// the session PID is guaranteed to belong to our core process.
+  void _adoptSession(BackendSession session) {
+    // Find or create a tab for the session's core.
+    var tabIdx = _tabs.indexWhere((t) => t.coreId == session.coreId);
+    if (tabIdx < 0) {
+      final newId = ++_nextTabId;
+      _tabs.add(SessionTab(
+        id: newId,
+        coreId: session.coreId,
+        selectedServerId: session.profileId,
+        phase: ConnectionPhase.idle,
+        connectedAt: null,
+      ));
+      tabIdx = _tabs.length - 1;
+      _activeTabId = newId;
+    }
+
+    final tab = _tabs[tabIdx];
+    setState(() {
+      _activeTabId = tab.id;
+      _tabs[tabIdx] = tab.copyWith(
+        selectedServerId: session.profileId,
+        phase: ConnectionPhase.connected,
+        connectedAt:
+            DateTime.fromMillisecondsSinceEpoch(session.startedAtUnixMs),
+      );
+      _supervisorSession = null;
+      _connectionMessage = null;
+      _progress = 1.0;
+      _download = List<double>.filled(16, 0);
+      _upload = List<double>.filled(16, 0);
+    });
+    _startTraffic();
+    _startSessionStatusPolling();
   }
 
   String _firstServerIdForCore(String coreId) {

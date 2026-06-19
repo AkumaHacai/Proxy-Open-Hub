@@ -714,7 +714,13 @@ class BackendSessionService {
 
     final process = await Process.start(
       cli.path,
-      ['desktop-session-supervise', stateFile.path, server.id],
+      [
+        'desktop-session-supervise',
+        stateFile.path,
+        server.id,
+        '--gui-pid',
+        pid.toString(),
+      ],
       runInShell: false,
     );
 

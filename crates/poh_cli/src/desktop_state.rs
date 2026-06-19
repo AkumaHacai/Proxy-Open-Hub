@@ -1818,7 +1818,14 @@ fn clear_persisted_session(
     session: Option<PersistedDesktopSession>,
 ) -> Result<(), DesktopStateError> {
     if let Some(session) = &session {
-        restore_network_effects(&session.network_effects)?;
+        // Best-effort: undoing OS network changes must NEVER abort teardown. A
+        // failure here (e.g. a foreign/removed TUN adapter whose DNS we snapshotted
+        // can no longer be restored) must not leave the session record stuck —
+        // otherwise every later command keeps reconciling and re-failing. Log and
+        // continue so the session is always cleared.
+        if let Err(error) = restore_network_effects(&session.network_effects) {
+            eprintln!("Warning: network effects restore was incomplete during teardown: {error}");
+        }
     }
 
     let session_path = session_file()?;
@@ -3215,6 +3222,7 @@ fn supervisor_is_stop_command(line: &str) -> bool {
 pub fn supervise_desktop_session(
     state_path: &Path,
     profile_id: &str,
+    gui_pid: Option<u32>,
 ) -> Result<(), DesktopStateError> {
     // ── Phase 1: start the core via the existing session path ─────────────────
     let start = start_desktop_session(state_path, profile_id)?;
@@ -3243,6 +3251,10 @@ pub fn supervise_desktop_session(
 
     // ── Phase 3: open a liveness handle for fast crash detection ──────────────
     let watcher = CoreWatcher::new(pid);
+
+    // Open a liveness handle for the GUI parent process (F5: belt-and-suspenders
+    // beyond stdin-EOF; catches GUI crashes that leave the pipe handle open).
+    let gui_watcher = gui_pid.map(CoreWatcher::new);
 
     // ── Phase 4: signal readiness to Flutter ──────────────────────────────────
     supervisor_emit(serde_json::json!({
@@ -3279,6 +3291,15 @@ pub fn supervise_desktop_session(
     loop {
         // Block on the core process for up to 500 ms; returns early on exit.
         let core_exited = watcher.wait_ms(500);
+
+        // Check if the GUI parent process has exited (handles GUI crashes that
+        // don't immediately close the stdin pipe).
+        if let Some(ref gw) = gui_watcher {
+            if gw.wait_ms(0) {
+                let _ = stop_desktop_session();
+                return Ok(());
+            }
+        }
 
         // Drain all pending stdin messages regardless of core state.
         loop {

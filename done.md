@@ -1,5 +1,71 @@
 # Done - Security And Modularity Work
 
+## GUI/Session desync + orphaned supervisor — F1–F6 (Claude Sonnet 4.6, 2026-06-19)
+
+Plan ref: `LLM_Cloud/gui-session-sync-investigation.md` §4 Priority 1+2.
+
+### Диагностика §2 (Группы A + B) — выводы из кода
+
+- **A1 ✅** `initState` не звал `desktop-session-status` → GUI стартовал в Disconnected независимо от живой сессии.
+- **A2 ✅** `PersistedDesktopSession` содержит `profile_id`, `core_id`, `started_at_unix_ms` — достаточно для реаттача.
+- **A3 ✅** `SessionAlreadyRunning(pid)` рендерился как ошибка `_connectionMessage`.
+- **A4 ✅** `_startSessionStatusPolling` содержал `if (!_connected)` guard → молчал без connected.
+- **B3 ✅** `dispose` не звал `supervisor.stop()`; завершение зависело только на pipe EOF.
+- **B4 ✅** Job Object держится супервизором; смерть GUI напрямую ядро не гасит.
+
+### F1 — Реаттач при старте GUI
+
+`_loadProfiles` завершает async-инициализацию вызовом `_checkExistingSession()`:
+- зовёт `poh_cli desktop-session-status`
+- если `running == true` → `_adoptSession(session)` → GUI переходит в Connected,
+  запускает трафик и статус-поллинг
+
+`_adoptSession` ищет или создаёт таб для `session.coreId`, выставляет `selectedServerId`,
+фазу `connected`, `connectedAt`, `_supervisorSession = null` (disconnect идёт через
+`stopSession()`). Rust-сторона уже проверила `creation_time_100ns`.
+
+### F2 — Adopt вместо ошибки SessionAlreadyRunning
+
+Блок catch в `_connect` теперь обнаруживает `error.message.contains('already running')` и
+вызывает `_tryAdoptSession(id)` вместо показа ошибки. Если сессия найдена — adopt; если нет —
+сброс в idle с сообщением.
+
+### F3 — Статус-поллинг и в Disconnected
+
+`_startSessionStatusPolling` переработан: убран `!_connected` guard, добавлен двусторонний
+анализ (5-секундный интервал):
+- connected + not running → показать "core exited", restart idle polling
+- not connected + not working + running → adopt
+Поллинг стартует из `_loadProfiles` (если не adopted), а также перезапускается после
+disconnect, selectServer, supervisor fault/exited.
+
+### F4 — Гарантированный останов при закрытии GUI
+
+`_ProxyOpenHubAppState` добавлен `with WidgetsBindingObserver`:
+- `initState`: `WidgetsBinding.instance.addObserver(this)`
+- `dispose`: `removeObserver` + `_supervisorSession?.stop()` (fire-and-forget)
+- `didChangeAppLifecycleState(detached)`: явный stop до закрытия пайпа
+
+### F5 — Супервизор следит за PID родительского GUI
+
+`supervise_desktop_session(state_path, profile_id, gui_pid: Option<u32>)` — новый параметр.
+CLI: `poh_cli desktop-session-supervise <state> <profile-id> [--gui-pid <pid>]`.
+Flutter передаёт `pid.toString()` (Dart's `dart:io` top-level `pid`) при спавне супервизора.
+В мониторинговом цикле: `gui_watcher.wait_ms(0)` — если GUI-процесс мёртв → `stop_desktop_session`.
+Используется тот же `CoreWatcher` (`PROCESS_SYNCHRONIZE` + `WaitForSingleObject(0)` on Windows).
+
+### F6 — Адоптация осиротевшей сессии
+
+Реализована через F1 + F2. `_adoptSession` ставит `_supervisorSession = null`, disconnect
+использует `stopSession()`. Rust-сторона проверяет `creation_time_100ns` в `desktop_session_status`.
+
+### Результат
+
+- `cargo fmt --all` clean; `cargo clippy -D warnings` clean; `cargo test --workspace` — 121 tests, 0 failed.
+- `dart format` clean; `dart analyze` — No issues; `flutter test` — 11 passed.
+
+
+
 Date: 2026-06-18
 
 > This file is the detailed changelog. The live checklist (what is done / what

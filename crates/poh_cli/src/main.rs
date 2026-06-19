@@ -711,14 +711,23 @@ fn desktop_session_log() -> ExitCode {
 }
 
 fn desktop_session_supervise(args: &[String]) -> ExitCode {
-    let (state_path, profile_id) = match args {
-        [s, p] => (s.as_str(), p.as_str()),
+    let (state_path, profile_id, gui_pid) = match args {
+        [s, p] => (s.as_str(), p.as_str(), None),
+        [s, p, flag, pid_str] if flag == "--gui-pid" => {
+            (s.as_str(), p.as_str(), pid_str.parse::<u32>().ok())
+        }
         _ => {
-            eprintln!("Usage: poh_cli desktop-session-supervise <state-path> <profile-id>");
+            eprintln!(
+                "Usage: poh_cli desktop-session-supervise <state-path> <profile-id> [--gui-pid <pid>]"
+            );
             return ExitCode::from(2);
         }
     };
-    match desktop_state::supervise_desktop_session(std::path::Path::new(state_path), profile_id) {
+    match desktop_state::supervise_desktop_session(
+        std::path::Path::new(state_path),
+        profile_id,
+        gui_pid,
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Supervisor error: {error}");

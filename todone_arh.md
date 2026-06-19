@@ -31,7 +31,7 @@ process supervisor, extra cores, and signature verification.
 | Workstream | Status |
 |---|---|
 | 1. Modular core store + TrustTunnel module | ~90% |
-| 2. Process lifecycle safety | ~95% |
+| 2. Process lifecycle safety | ~99% |
 | 3. NaiveProxy core (end-to-end) | ~95% |
 | 4. UI / layout / animation | ~95% |
 | 5. Future cores + release hardening | ~25% |
@@ -95,7 +95,7 @@ Plan: `process-lifecycle.md`.
       `.is_some_and(…)`; `DesktopStateError` messages de-TrustTunnel-ified (now say
       "core executable", "core readiness probe timed out", etc.);
       `cargo clippy -D warnings` added to `scripts/check.ps1`.
-- [x] **P3** long-lived supervisor + Windows Job Object (`KILL_ON_JOB_CLOSE`) + real-time crash detection.
+- [x] **P3** long-lived supervisor + Windows Job Object (`KILL_ON_JOB_CLOSE`) + real-time crash detection + **F1–F6 GUI/session desync fix (2026-06-19)**.
       `supervise_desktop_session` starts the core, wraps it in a Job (`JobHandle` RAII
       → KILL_ON_JOB_CLOSE), monitors liveness via `CoreWatcher` (`WaitForSingleObject`
       on Windows; `kill -0` fallback on non-Windows), reads stop commands / stdin EOF
@@ -105,6 +105,13 @@ Plan: `process-lifecycle.md`.
       in `BackendSessionService`; `_supervisorSession` held in `_HomeState`;
       `_onSupervisorEvent` handles faulted events; `_disconnect` sends stop via
       supervisor stdin.
+- [x] **F1–F6 GUI/session desync fix (2026-06-19)**: реаттач при старте GUI (F1,
+      `_checkExistingSession` + `_adoptSession`); adopt вместо ошибки SessionAlreadyRunning
+      (F2, `_tryAdoptSession`); статус-поллинг и в Disconnected (F3, 5-секундный
+      двусторонний таймер); гарантированный останов при закрытии GUI (F4, `WidgetsBindingObserver`
+      + dispose + `didChangeAppLifecycleState`); супервизор следит за GUI PID (F5, `--gui-pid`
+      параметр + `CoreWatcher::wait_ms(0)` в мониторинговом цикле); адоптация осиротевших
+      сессий (F6, через F1+F2). Все 121 Rust + 11 Flutter тестов зелёные.
 
 ## 3. NaiveProxy core (end-to-end)  (~95%)
 
