@@ -38,6 +38,11 @@ try {
     $rel = Join-Path $root "apps\desktop_flutter\build\windows\x64\runner\Release"
     $stage = Join-Path $root "ProxyOpenHub-portable-win-x64"
 
+    # Keep the BUILD folder self-consistent too: refresh the poh_cli.exe that sits
+    # next to the GUI there, so running proxy_open_hub.exe directly from build/ also
+    # uses the matching backend (avoids the stale-binary / --gui-pid mismatch).
+    Copy-Item -Force (Join-Path $root "target\release\poh_cli.exe") (Join-Path $rel "poh_cli.exe")
+
     # 3) Assemble: copy Release, excluding the stale bundled cli + dev junk
     robocopy $rel $stage /E /XF "poh-visual-check-*.png" "poh_cli.exe" "native_assets.json" /NFL /NDL /NJH /NJS /NP | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "robocopy failed: $LASTEXITCODE" }
