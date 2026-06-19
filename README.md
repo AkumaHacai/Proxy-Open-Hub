@@ -2,43 +2,74 @@
 
 ![Proxy Open Hub logo](logo/proxy-open-hub-horizontal.svg)
 
-Proxy Open Hub is a modular Windows proxy/VPN hub. The active migration target is:
+Proxy Open Hub is a modular Windows desktop hub for proxy and VPN cores. The
+current application combines a Rust backend with a Flutter desktop UI and ships
+with a bundled TrustTunnel runtime as the first working core.
 
-- Rust backend for core adapters, trusted sources, config materialization, process lifecycle, secrets, logs, and security checks.
-- Flutter desktop UI for the main client, settings, logs, and future per-core screens.
-- Bundled TrustTunnel CLI core as the first working runtime.
+This is not the official TrustTunnel client. It is an independent shell designed
+to manage multiple cores behind one UI. TrustTunnel is the current packaged
+runtime; sing-box, NaiveProxy, Xray-core, and Hysteria2 are represented in the
+core model and UI while their trusted install/update flow is still being
+hardened.
 
-The project is not the official TrustTunnel client. It is an independent desktop shell that currently supports TrustTunnel profiles and is being prepared for optional cores such as sing-box, NaiveProxy, Xray-core, and Hysteria2.
+Russian README: [README_ru.md](README_ru.md)
 
-## Active Project Layout
+## Portable Pre-release
 
-These are the folders you usually need:
+The current Windows x64 portable package is:
+
+```text
+ProxyOpenHub-portable-win-x64-2026-06-19-fix1.zip
+```
+
+The archive contains:
+
+```text
+proxy_open_hub.exe          Flutter desktop app
+poh_cli.exe                 Rust CLI bridge used by the UI
+data/                       Flutter runtime data
+native/bundled/win-x64/     bundled TrustTunnel client and Wintun DLL
+README.txt                  portable package notes
+```
+
+To run it:
+
+1. Download the zip from GitHub Releases.
+2. Extract the whole `ProxyOpenHub-portable-win-x64` directory.
+3. Run `proxy_open_hub.exe`.
+
+Application state is stored in:
+
+```text
+%LOCALAPPDATA%\ProxyOpenHub\
+```
+
+Secrets are stored through Windows DPAPI and are tied to the current Windows
+user. This build is a pre-release: expect unsigned-binary warnings, incomplete
+installer/tray behavior, and manual update flow.
+
+## Project Layout
 
 ```text
 Cargo.toml                         Rust workspace root
 crates/                            Rust backend crates
   poh_cli/                         CLI bridge used by Flutter
-  poh_core/                        Core adapters, TrustTunnel parser/builder, security policy
-  poh_core_runner/                 Runtime config materialization
-  poh_core_session/                Process launch helpers
-  poh_core_store/                  Trusted core install/verify store
+  poh_core/                        core adapters, import/parsing, security policy
+  poh_core_runner/                 runtime config materialization
+  poh_core_session/                process launch helpers and descriptors
+  poh_core_store/                  trusted core install/verify store
 apps/desktop_flutter/              Flutter desktop application
-core-registry/trusted-sources.json Trusted core source registry
-native/bundled/win-x64/            Bundled TrustTunnel runtime files
-logo/                              Source logo assets
-docs/                              Migration/security/native notes
-backups/Old Files/                 Old WPF app, HTML references, archived duplicates
+core-registry/trusted-sources.json trusted core source registry
+native/bundled/win-x64/            bundled TrustTunnel runtime files
+logo/                              source logo assets
+docs/                              migration/security/native notes
+backups/Old Files/                 old WPF app, references, archived duplicates
 ```
 
-The old WPF/.NET project and HTML references were moved to:
+The old WPF/.NET project and HTML references are archived under
+`backups/Old Files/`.
 
-```text
-backups/Old Files/2026-06-16-wpf-and-references/
-```
-
-`.vs/` may remain in the root if Visual Studio has it locked. It is local IDE cache, not part of the active app.
-
-## Quick Start
+## Quick Start For Development
 
 From the repository root:
 
@@ -48,45 +79,33 @@ From the repository root:
 .\scripts\run-desktop.ps1
 ```
 
-`build-desktop.ps1` builds both layers and copies `poh_cli.exe` beside the
-Flutter executable so the Connect button can find the Rust backend.
+`build-desktop.ps1` builds the Rust CLI and the Flutter Windows app, then copies
+`poh_cli.exe` beside `proxy_open_hub.exe` so the UI can find the backend.
 
-## Built EXE
-
-After a Flutter Windows build, run:
+Built desktop executable:
 
 ```text
 apps/desktop_flutter/build/windows/x64/runner/Release/proxy_open_hub.exe
 ```
 
-The Rust helper CLI is:
-
-```text
-target/debug/poh_cli.exe
-```
-
-The build script also copies it here:
-
-```text
-apps/desktop_flutter/build/windows/x64/runner/Release/poh_cli.exe
-```
-
-Flutter finds `poh_cli.exe` beside the app or by walking parent folders. You can override it:
-
-```powershell
-$env:POH_CLI_PATH = "C:\Users\mirot\Documents\TT gui\target\debug\poh_cli.exe"
-```
-
-TrustTunnel bundled runtime is expected here:
+Bundled TrustTunnel runtime is expected here:
 
 ```text
 native/bundled/win-x64/trusttunnel_client.exe
 native/bundled/win-x64/wintun.dll
 ```
 
-For local debugging only, you can override the core path. This is blocked in normal runs; set `POH_DEV=1` or use a debug build, and the binary still has to match the pinned bundled SHA-256:
+For local debugging, the backend path can be overridden:
 
 ```powershell
+$env:POH_CLI_PATH = "C:\path\to\poh_cli.exe"
+```
+
+TrustTunnel core override is intentionally restricted to debug/dev runs and must
+still match the pinned SHA-256 when the security policy requires it:
+
+```powershell
+$env:POH_DEV = "1"
 $env:POH_TRUSTTUNNEL_CORE_PATH = "C:\path\to\trusttunnel_client.exe"
 ```
 
@@ -96,6 +115,7 @@ Rust backend:
 
 ```powershell
 C:\Users\mirot\.cargo\bin\cargo.exe fmt --all --check
+C:\Users\mirot\.cargo\bin\cargo.exe clippy --workspace -- -D warnings
 C:\Users\mirot\.cargo\bin\cargo.exe test --workspace
 C:\Users\mirot\.cargo\bin\cargo.exe build -p poh_cli
 ```
@@ -104,6 +124,7 @@ Flutter UI:
 
 ```powershell
 cd .\apps\desktop_flutter
+C:\Users\mirot\devtools\flutter\bin\dart.bat format lib test
 C:\Users\mirot\devtools\flutter\bin\flutter.bat analyze
 C:\Users\mirot\devtools\flutter\bin\flutter.bat test
 C:\Users\mirot\devtools\flutter\bin\flutter.bat build windows
@@ -117,68 +138,68 @@ Combined scripts:
 .\scripts\run-desktop.ps1 -Build
 ```
 
-Quick backend session commands:
+## CLI Bridge
 
-```powershell
-.\target\debug\poh_cli.exe desktop-session-status
-.\target\debug\poh_cli.exe desktop-session-log
+Flutter talks to Rust through `poh_cli.exe`. Important desktop commands:
+
+```text
+desktop-list-profiles <state-path>
+desktop-core-schema <core_id>
+desktop-core-modes <core_id>
+desktop-validate-profile <state-path>    # JSON on stdin
+desktop-update-profile <state-path>      # JSON on stdin
+desktop-preview-profile <input-text-file|->
+desktop-import-profile <input-text-file|->
+desktop-session-plan <state-path> <profile-id>
+desktop-session-start <state-path> <profile-id>
+desktop-session-supervise <state-path> <profile-id>
+desktop-session-stop
+desktop-session-reset
+desktop-session-status
+desktop-session-log
 ```
 
-Quick TrustTunnel import command:
-
-```powershell
-.\target\debug\poh_cli.exe desktop-import-profile C:\path\to\profile.toml
-```
-
-The Flutter Add Server button uses the same command through the bundled
-`poh_cli.exe` and writes `%LOCALAPPDATA%\ProxyOpenHub\desktop-state.json`.
-
-`desktop-session-start` starts the real TrustTunnel core. Use it only when you are ready for a real local SOCKS/TUN runtime:
-
-```powershell
-.\target\debug\poh_cli.exe desktop-session-start <desktop-state.json> <profile-id>
-.\target\debug\poh_cli.exe desktop-session-stop
-```
+Per-core route settings are stored in `desktop-state.json` through
+`RoutePresetsByCore`, `ActiveRouteByCore`, and `ActiveModeByCore`.
 
 ## Current Status
 
 Implemented in the Rust + Flutter path:
 
-- Real saved-profile loading from `desktop-state.json`.
-- TrustTunnel TOML session materialization with real saved secrets.
-- Redacted runtime preview and logs.
-- Real `trusttunnel_client.exe` start/stop/status lifecycle through Rust CLI.
-- Flutter main UI with compact/expanded modes.
-- Flutter settings shell wired into the main UI.
-- Flutter logs shell wired into the main UI.
-- Flutter Add Server import shell wired into the main UI.
-- TrustTunnel TOML/tt-link import into `%LOCALAPPDATA%\ProxyOpenHub\desktop-state.json`.
-- Imported secrets are stored as DPAPI-protected `ProtectedSecrets`; legacy plaintext `Secrets` are migrated on load.
-- Import preview requires confirmation for high-risk TLS and LAN listener settings before saving.
-- TOML parser handles UTF-8 BOM files from Windows editors.
-- Persistent app settings saved to `%LOCALAPPDATA%\ProxyOpenHub\app-settings.json`.
-- Live network metrics service based on OS counters while connected.
-- Combined PowerShell build/check/run scripts for the Rust + Flutter app.
-- Trusted-source registry scaffold for future optional cores.
-- Core store can list installed cores and track the active version per core.
-- Core store supports zip/multifile artifacts with zip-slip guards and installed file hashes.
-- Installable GitHub-release cores now require pinned release metadata before download UI can be enabled.
-- Rust downloader can plan and fetch only pinned GitHub release assets, then verify SHA-256 before install staging.
-- Desktop sessions now use lifecycle states, a single-instance lock, startup readiness probes, and faulted-session reporting.
-- Launch descriptors now define default executable paths and launch behavior for known cores.
+- Real desktop profile loading from `%LOCALAPPDATA%\ProxyOpenHub\desktop-state.json`.
+- TrustTunnel TOML and `tt://` import with DPAPI-protected secrets.
+- NaiveProxy JSON/proxy URL import path and generic per-core profile model.
+- Per-core profile list, active-core filtering, and core-aware accent colors.
+- Schema-driven profile editor backed by `desktop-core-schema`,
+  `desktop-validate-profile`, and `desktop-update-profile`.
+- Per-core route modes and user route presets backed by the desktop-state
+  contract.
+- TrustTunnel session plan/start/stop/status/log lifecycle through Rust CLI.
+- Supervised session launch path, lifecycle states, single-instance lock,
+  readiness probes, and faulted-session reporting.
+- Redacted runtime previews and log redaction.
+- System proxy, DNS, route, firewall, and kill-switch rollback ledger.
+- Flutter main UI with compact/expanded modes, settings, routes, logs, import,
+  profile editing, live network metrics, and core tabs.
+- Trusted-source registry and core store foundations for future downloadable
+  cores.
+- ZIP/multifile core artifact handling with zip-slip guards and installed file
+  hashes.
 
 Still in progress:
 
+- Full trusted download/update UI for sing-box, NaiveProxy, Xray-core, and
+  Hysteria2.
 - Exact TrustTunnel/Wintun adapter matching for live traffic.
-- Log streaming instead of manual refresh.
-- Full routing/profile editor migration from WPF to Flutter.
-- Long-lived session watchdog/service behavior and system proxy rollback hooks.
-- TrustTunnel bundle migration into managed core store layout.
-- Trusted download/update UI for sing-box, NaiveProxy, Xray-core, and Hysteria2.
-- Installer, tray behavior, and packaging.
+- Streaming logs instead of manual refresh.
+- Per-core advanced settings pages.
+- Installer, tray behavior, code signing, and automatic update flow.
+- Long-lived service/watchdog behavior and broader integration tests.
 
 ## License
 
-Proxy Open Hub source code is licensed under the Apache License 2.0. See `LICENSE.txt`.
+Proxy Open Hub source code is licensed under the Apache License 2.0. See
+`LICENSE.txt`.
 
-Bundled native components and future downloadable cores keep their own licenses. See `NOTICE.md` and license files shipped beside each native binary.
+Bundled native components and future downloadable cores keep their own licenses.
+See `NOTICE.md` and license files shipped beside each native binary.
