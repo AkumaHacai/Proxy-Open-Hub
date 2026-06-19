@@ -90,6 +90,9 @@ skills/
 build/
 coverage/
 
+# Node / tooling
+node_modules/
+
 # Upgrade Log files
 Backup/
 UpgradeLog*.XML

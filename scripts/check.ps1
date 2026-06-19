@@ -15,6 +15,7 @@ if (-not (Test-Path $Cargo)) {
 Push-Location $Root
 try {
     & $Cargo fmt --all --check
+    & $Cargo clippy --workspace --all-targets -- -D warnings
     & $Cargo test --workspace
 
     if (-not $SkipFlutter) {

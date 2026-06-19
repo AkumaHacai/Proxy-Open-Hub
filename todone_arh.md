@@ -1,170 +1,292 @@
-# Modularity Architecture Progress
+# Master Progress Checklist (orchestrator-verified)
 
-Start date: 2026-06-18
+Last verified: 2026-06-18 by reading the actual code + running the suites.
 
-Goal: move Proxy Open Hub to a modular architecture where adapters remain in our
-Rust code, while core binaries are installed, verified, updated, and isolated by
-the managed core store.
+Verification run:
+- Rust: `cargo test --workspace` -> 100 tests pass (41 poh_cli + 27 poh_core +
+  6 poh_core_runner + 9 poh_core_session + 17 poh_core_store);
+  `cargo fmt --check` + `cargo clippy -D warnings` clean.
+- P3 supervisor: `JobHandle` RAII + `CoreWatcher` + `supervise_desktop_session`
+  + `desktop-session-supervise` CLI command + `SupervisedSession` Flutter class
+  + supervisor-based connect/disconnect in `_HomeState`.
+- R-1: safety-net leases now persisted in `Starting` state (before readiness probe);
+  `ReadinessTimedOut` path kills the stalled process immediately.
+- R-2: `route_restore_commands` uses `ipv6` token for IPv6 CIDRs.
+- R-3/R-4: clippy clean; `DesktopStateError` messages de-TrustTunnel-ified.
+- Signature enforcement: `signature_preferred` wired per-source in `resolve_store_core`;
+  NaiveProxy set `signature_preferred: false`; planned cores retain `true`.
+- `_AppearIn` cascade entrance: 4 sections staggered (0/50/100/150ms),
+  `_expandReveal` key-force retrigger on expand.
+- Flutter: `flutter analyze` -> No issues, `flutter test` -> 7 passed.
 
-## Phase A - Modularity Foundation
+This file is the live checklist. `done.md` is the detailed changelog. Plan/design
+docs: `LLM_Cloud/{modularity-architecture,process-lifecycle,naiveproxy-integration,ui-layout-and-animation}.md`.
 
-- [x] A1. Add `pinned_release` to the trusted source catalog.
-- [x] A1. Validate pinned release metadata: version, asset name, SHA-256, allowed asset pattern.
-- [x] A1. Reject installable GitHub sources without `pinned_release`.
-- [x] A1. Check installed manifests against pinned release before verify/start.
-- [x] A2. Add `CoreStore::list_installed()`.
-- [x] A2. Add per-core `active.json` plus `CoreStore::active_version()` / `set_active_version()`.
-- [x] A2. Mark a version active after successful install.
-- [x] A2. Add CLI command `poh_cli core-list-installed`.
-- [x] A2. Add zip/multifile install with zip-slip guard.
-- [x] A2. Separate pinned archive SHA from installed file hashes for tamper detection.
-- [x] A2. Add GC for old versions: active + rollback retention.
-- [x] A3. Add HTTPS downloader for pinned GitHub assets with SHA-256 verification.
-- [x] A3. Add CLI `core-download-plan <core-id>` and `core-install <core-id> [executable-relative-path]`.
-- [x] A4. Add session lifecycle states, single-instance file lock, stale lock recovery, and readiness probe helpers.
-- [x] A4. Wire desktop TrustTunnel start/stop/status into session lock, startup readiness, and faulted session state.
-- [ ] A4. Add long-lived watchdog/service layer for automatic crash rollback while the UI process is not polling.
-- [x] A5. Add `CoreLaunchDescriptor` registry with executable path, working directory, runtime path mode, append args, and log file policy.
-- [x] A5. Use descriptors for `core-install <core-id>` default executable paths.
-- [x] A5. Use TrustTunnel descriptor for desktop launch args/log path instead of hardcoding command args in the desktop session flow.
-- [x] A5. Move bundled TrustTunnel lookup itself into managed store / descriptor-backed module resolution.
+Legend: `[x]` verified in code · `[~]` partial · `[ ]` not started.
 
-## Phase B - TrustTunnel As Managed Module (DONE - architecture pass 2026-06-18)
+Overall completion: ~65% of the full documented roadmap.
+Foundation is ~90% done; the open work is the download/install UI, the Tier-2
+process supervisor, extra cores, and signature verification.
 
-- [x] Move bundled TrustTunnel into store layout `cores/trusttunnel/<version>/`.
-- [x] Keep pinned SHA checks for `trusttunnel_client.exe` and `wintun.dll`.
-- [x] Launch TrustTunnel command args/log path through the shared descriptor/session layer.
-- [x] Resolve TrustTunnel executable from managed core store instead of app-local bundle lookup.
-- [x] Keep a migration path for the current app-local bundle until an official pinned download source exists.
+| Workstream | Status |
+|---|---|
+| 1. Modular core store + TrustTunnel module | ~90% |
+| 2. Process lifecycle safety | ~95% |
+| 3. NaiveProxy core (end-to-end) | ~95% |
+| 4. UI / layout / animation | ~95% |
+| 5. Future cores + release hardening | ~25% |
 
-### How Phase B was implemented (read before touching this area)
+---
 
-- New store API `CoreStore::install_manual_bundle(manifest, source_dir, trusted_sources)`
-  in `crates/poh_core_store/src/lib.rs`. It installs a locally bundled, multi-file
-  core into `cores/<core_id>/<version>/` by copying each file listed in
-  `manifest.files` only after its bytes match the pinned per-file SHA-256, then
-  reuses the same staging/rollback/`set_active_version` promotion path as the
-  downloader. The `"manual"` sha256 sentinel is allowed (a bundle has no single
-  archive hash) but per-file hashes are mandatory, so a bundled core is held to
-  the same integrity bar as a downloaded one.
-- Shared install plumbing was extracted to avoid divergence: `plan_paths`,
-  `reset_staging`, `promote_staged`. `install()` and `install_manual_bundle()`
-  now share the promote/rollback tail.
-- Desktop launch now resolves through the store. `crates/poh_cli/src/desktop_state.rs`
-  replaces `find_trusttunnel_client()` with `resolve_core(core_id)`:
-  - `trusttunnel` -> `resolve_trusttunnel_core()`: fast path verifies the active
-    store version; if missing/tampered it provisions the app-local bundle
-    (`<app>/native/bundled/win-x64/`) into the store via `install_manual_bundle`,
-    then `verify_core` before launch. This is the migration path.
-  - any other core -> `resolve_store_core()`: must already be installed and
-    verifies the active version (forward path for downloadable modules).
-  - `POH_TRUSTTUNNEL_CORE_PATH` stays a dev-only, hash-checked direct path and
-    never writes into the store.
-- Pinned hashes live in one place now: `BUNDLED_TRUSTTUNNEL_SHA256` /
-  `BUNDLED_WINTUN_SHA256` feed `bundled_trusttunnel_manifest()` (version
-  `BUNDLED_TRUSTTUNNEL_VERSION = "1.0.49"`). The launch working directory comes
-  from the descriptor (`ExecutableParent`), so `wintun.dll` loads from the same
-  store version directory.
-- Tests added: `store_installs_manual_bundle_with_pinned_file_hashes`,
-  `store_rejects_manual_bundle_with_wrong_pinned_hash`. Full workspace: 49 tests
-  pass; `cargo fmt --all --check` clean.
+## 1. Modular core store + TrustTunnel as a module  (~90%)
 
-## Phase C - NaiveProxy As First Downloadable Module
+Plan: `modularity-architecture.md` Phases A + B.
 
-- [ ] Pin release metadata: version, asset name, SHA-256.
-- [x] Add `NaiveProxyAdapter` to `poh_core`.
-- [x] Import `config.json` and proxy URLs without storing plaintext passwords in profiles.
-- [x] Materialize `config.json` through secret placeholders + runner secret allowlist.
-- [x] Wire NaiveProxy desktop profile import/storage through the generic DPAPI state path.
-- [ ] Wire install flow through catalog/store/downloader.
-- [x] Add LocalProxy readiness probe for NaiveProxy.
-- [x] Add system proxy ownership/rollback.
+- [x] `pinned_release` in trusted-source catalog + validation (version/asset/sha/pattern).
+- [x] Installable GitHub sources must be active + checksum-required + pinned.
+- [x] `CoreStore::list_installed()`, per-core `active.json`, `active_version()/set_active_version()`.
+- [x] `core-list-installed` CLI command.
+- [x] `catalog-list` CLI command merges trusted-source catalog + installed store state for UI.
+- [x] zip/multifile install with zip-slip guard, dup/empty/reserved-name rejection, per-file hashes + tamper verify.
+- [x] GC for old versions (`garbage_collect_old_versions`): keep active + newest inactive (rollback).
+- [x] Pinned HTTPS downloader (no "latest" lookup) + SHA-256 verify before staging.
+- [x] `core-download-plan` / `core-install` CLI commands.
+- [x] `CoreLaunchDescriptor` registry (trusttunnel, sing-box, naiveproxy, xray-core, hysteria2).
+- [x] **Phase B:** bundled TrustTunnel provisioned into the store (`install_manual_bundle`),
+      pinned exe+wintun hashes, store-based `resolve_core()`, app-local bundle = migration source only.
+- [ ] (A4) Long-lived watchdog/service for crash rollback while UI is not polling -> see Workstream 2 / P3.
 
-## Already Connected To Earlier Work
+## 2. Process lifecycle safety (connect/disconnect/safe processes)  (~70%)
 
-- Secrets remain in DPAPI `ProtectedSecrets`; the modular path does not reintroduce plaintext state.
-- Runtime/session/state/config/log files keep restrictive ACLs.
-- Trusted source policy is strict: a downloadable core must have a pinned release before install UI can be enabled.
-- Fake/swapped core protection now checks source owner/repo, asset pattern, pinned version/asset/SHA, archive SHA, and installed file hashes.
-- Downloader only supports installable active GitHub-release sources and verifies the downloaded bytes before install staging.
+Plan: `process-lifecycle.md`.
 
-## Next Safe Step (handoff for the finishing coder)
+- [x] **P1** reuse-proof identity (`creation_time_100ns`, PID+image+creation time).
+- [x] **P1** safe stop: graceful (CTRL_BREAK) -> force -> confirm-exit; `CoreStopFailed` if it survives.
+- [x] **P1** runtime_dir removed only after confirmed exit, with retries (plaintext-config cleanup).
+- [x] **P1** `enforce_transition` + `IllegalTransition`; corrupt `session.json` treated as no session.
+- [x] **P1** session lifecycle states + single-instance file lock + stale-lock recovery + readiness probes.
+- [x] **P2** `desktop-session-reset` (repair) command.
+- [x] **P2** reconcile before start/stop (reap dead, adopt live, migrate stale Idle->Running).
+- [x] **P2** Windows system-proxy ownership + rollback (`network_effects.rs`, snapshot/restore in session.json).
+- [x] **P2** network safety-net DNS: ledger is generic (`DnsLease` + `DnsInterfaceSnapshot`);
+      `parse_netsh_dnsservers` + `read_dns_lease` added; `start_desktop_session` now
+      snapshots DNS **before spawn** when `change_system_dns` is active and stores the
+      lease in `session.network_effects.dns` after readiness probe passes; restored via
+      `restore_network_effects` on every stop/reset/reconcile path.
+      Parser now handles localized `netsh` output, not just English headers.
+- [x] **P2** network safety-net routes/firewall: `RouteLease` records TUN adapter
+      name + configured CIDR prefixes; `FirewallLease` snapshots pre-session
+      Windows Firewall rule names. Both added to `NetworkEffectsState`, serialized
+      in `session.json`, restored by `restore_network_effects` (firewall → routes →
+      dns → system_proxy order). `route_restore_commands` (pure) + `firewall_restore_commands`
+      (pure, locale-agnostic `parse_netsh_advfirewall_rules`) + 12 new unit tests.
+      Wired in `start_desktop_session`: `route_lease_for_profile` + `should_snapshot_firewall`
+      both computed before `desktop_profile` is consumed; firewall lease snapshotted
+      before spawn; both wired into session after readiness probe passes.
+- [x] **Review R-1**: safety-net leases (dns/routes/firewall) now persisted at session
+      `Starting` state — before the first `save_session` — so a `Faulted` path always
+      has the pre-session network snapshot on disk and `restore_network_effects` runs
+      correctly. `ReadinessTimedOut` now calls `terminate_session_process` + 
+      `clear_persisted_session` immediately instead of leaving a stalled core alive.
+- [x] **Review R-2**: `route_restore_commands` now detects IPv4 vs IPv6 from the CIDR
+      (`cidr.contains(':')` → `ipv6` token); fixes `::/0` full-tunnel IPv6 restore.
+      Test `route_restore_commands_multiple_cidrs_*` corrected to assert `ipv6` for `::/0`.
+- [x] **Review R-3/R-4 + clippy gate**: `looks_like_addr` `.map_or(false,…)` →
+      `.is_some_and(…)`; `DesktopStateError` messages de-TrustTunnel-ified (now say
+      "core executable", "core readiness probe timed out", etc.);
+      `cargo clippy -D warnings` added to `scripts/check.ps1`.
+- [x] **P3** long-lived supervisor + Windows Job Object (`KILL_ON_JOB_CLOSE`) + real-time crash detection.
+      `supervise_desktop_session` starts the core, wraps it in a Job (`JobHandle` RAII
+      → KILL_ON_JOB_CLOSE), monitors liveness via `CoreWatcher` (`WaitForSingleObject`
+      on Windows; `kill -0` fallback on non-Windows), reads stop commands / stdin EOF
+      from Flutter over a background mpsc channel, and calls `stop_desktop_session()`
+      (restoring all network effects) on crash or stop.  CLI: `desktop-session-supervise
+      <state-path> <profile-id>`.  Flutter: `SupervisedSession` + `startSupervisedSession`
+      in `BackendSessionService`; `_supervisorSession` held in `_HomeState`;
+      `_onSupervisorEvent` handles faulted events; `_disconnect` sends stop via
+      supervisor stdin.
 
-Phase A and Phase B are done. The launch path is now core-agnostic: it always
-resolves a verified core from the managed store, and TrustTunnel is just a
-manual-bundle module that self-provisions on first run. Adding the next core is
-now mostly an adapter + a pinned catalog entry, with no changes to the session
-layer.
+## 3. NaiveProxy core (end-to-end)  (~95%)
 
-Recommended order:
+Plan: `naiveproxy-integration.md`.
 
-1. **Phase C - NaiveProxy as the first downloadable module** (see
-   `LLM_Cloud/naiveproxy-integration.md`, Stage 2-5). The plumbing it needs
-   already exists:
-   - catalog: add a real `pinned_release` (version, asset_name, sha256) to the
-     `naiveproxy` entry in `core-registry/trusted-sources.json` and flip it to
-     `status: active`, `install_enabled: true` once a version is confirmed;
-   - install: `poh_cli core-install naiveproxy` already works through the
-     downloader/store once the source is pinned + active;
-   - launch: a `naiveproxy` descriptor already exists
-     (`CoreLaunchDescriptor::for_core`, LocalProxy/`naive.exe`); `resolve_store_core`
-     will resolve it with no session-layer changes.
-  - adapter: DONE. `NaiveProxyAdapter` parses `config.json` and proxy URLs,
-    extracts `proxy.password` / `listen.password` into secret candidates, keeps
-    plaintext passwords out of `core_config`, and materializes `config.json`
-    through placeholders accepted by `poh_core_runner`.
-  - generic desktop bridge: DONE. Non-TUN profiles can now persist as
-    `CoreId` + opaque `CoreConfig` + `SecretRefs`, with DPAPI-protected secret
-    values in the same desktop state.
-  - LocalProxy readiness: DONE for NaiveProxy. Startup probes the imported
-    `listen` host/port instead of sleeping.
-  - system-proxy ownership/rollback: DONE for the desktop session path. Profiles
-    can opt in through `Listener.SystemProxy`; `session.json` records
-    `network_effects`, Windows proxy state is snapshotted before apply, and
-    stop/reset/reconcile restore it before removing the session.
-  - remaining new code: the real pinned catalog entry + install UI flow. Do NOT
-    store the proxy password in the profile; URL-encode it in the secret value
-    (see the security note in the integration doc).
+- [x] `NaiveProxyAdapter` in `poh_core` + registered in CLI registry.
+- [x] Config models (`naiveproxy_config.rs`): listen/proxy + safe advanced flags.
+- [x] Import `config.json` and bare proxy URLs (`https://`/`quic://user:pass@host`).
+- [x] Passwords -> secret candidates (`proxy.password`/`listen.password`), never in `core_config`.
+- [x] `config.json` materialized via secret placeholders; runner secret allowlist extended.
+- [x] URL userinfo redaction (`scheme://user:****@host`) in logs/previews.
+- [x] Generic desktop bridge: non-TUN profile = `CoreId` + opaque `CoreConfig` + `SecretRefs` (DPAPI).
+- [x] LocalProxy readiness probe (TCP to listen host/port).
+- [x] System-proxy ownership/rollback for the desktop session (shared with P2).
+- [x] Pin a real NaiveProxy release: `v149.0.7827.114-1`, asset
+      `naiveproxy-v149.0.7827.114-1-win-x64.zip`,
+      sha256 `50f8138a1cfaeaf28866cb9f7ff25fbd92d2b3bd642885e95131f7d56ebf1086`;
+      `status: active`, `install_enabled: true` in trusted-sources.json.
+- [x] Install UI: `BackendSessionService.coreInstall(coreId)` → `core-install`;
+      `CoreSpec.installable/installing`; `_installCore` in `_HomeState`;
+      `_CoreMenuItem` shows "Install" / spinner / "Open" by state.
+- [x] Acceptance run: supplied real `config.json` imported; pinned NaiveProxy
+      release installed; managed session started; local SOCKS `127.0.0.1:1080`
+      verified; external HTTPS request through the proxy returned `HTTP 204`.
+- [x] Real-world fixes from acceptance: `listen` arrays in NaiveProxy JSON,
+      UTF-8 BOM desktop-state loading, nested ZIP executable resolution, and
+      archive-core absolute runtime config arguments.
 
-2. **Process lifecycle hardening (connect/disconnect/safe process control)** -
-   full plan in `LLM_Cloud/process-lifecycle.md`. This is the riskiest area:
-   `poh_cli` is an ephemeral CLI, so after start the OS handle is dropped and all
-   stop/status is PID-based.
-   - **P1 DONE (2026-06-18):** reuse-proof process identity (PID + creation time,
-     closes F-3), graceful->force stop with confirmed exit + `CoreStopFailed`,
-     runtime_dir cleanup with retries, `enforce_transition`/`IllegalTransition`,
-     corrupt-`session.json` resilience. See process-lifecycle.md section 13 + done.md.
-   - **P2 IN PROGRESS:** `desktop-session-reset`, start/stop reconciliation, and
-     system-proxy ownership/rollback are implemented. Remaining P2 work is the
-     broader network safety-net: TUN/DNS/kill-switch repair after force-kill or
-     crash. This is the real fix for "internet stays broken after a force-kill /
-     crash" - graceful CTRL_BREAK in P1 is only best-effort.
-   - **P3 (= A4):** long-lived supervisor with a Windows Job Object
-     (`KILL_ON_JOB_CLOSE`) that guarantees no orphaned cores + real-time crash
-     detection. Supersedes/expands the A4 item below.
+## 4. UI / layout / animation  (~90%)
 
-3. **Remaining hardening (still open in Phase A):**
-   - A4: long-lived watchdog/service for automatic crash rollback + system proxy
-     revert while the UI is not polling (today faulted state is only detected on
-     the next status poll). Detailed design is now in
-     `LLM_Cloud/process-lifecycle.md` (Tier 2).
-   - Signature/AuthentiCode validation before enabling the install/update UI for
-     downloadable cores (`SignatureStatus` is still only `Unknown`).
+Plan: `ui-layout-and-animation.md`.
 
-### A2 GC implementation note
+- [x] Critical vertical-text bug fixed (responsive `_Field`, `Wrap` segments, adaptive `SettingsShell`).
+- [x] `PohMotion` tokens; compact<->expanded curves unified (`fastOutSlowIn`, 300ms).
+- [x] Overlay host: expanded = dim centered card; compact = bottom sheet (blur removed per owner).
+- [x] Routing moved out of global settings into a dedicated `RoutesShell` (presets / custom rules / applications).
+- [x] Routes persisted per core (`routesByCore` / `routeRulesByCore` in app-settings).
+- [x] Flutter reads the Rust core catalog for the core selector / route tabs, keeping planned
+      cores visible but locked until pinned/installed.
+- [x] Route core tabs are horizontally scrollable, so Hysteria2/future cores are not clipped.
+- [x] Resize animation rewrite: `ClipRect`+`OverflowBox`(final size)+`RepaintBoundary` mask; off-mode panels
+      laid out at their own final size; safe text (`maxLines:1`+ellipsis) on server names/addresses.
+- [x] Native window min size (`WM_GETMINMAXINFO` -> 360x560).
+- [x] `_AppearIn` cascade entrance for the detail pane (fade + 6px upward slide,
+      0/50/100/150ms stagger; `_expandReveal` ValueKey retriggers on each expand).
+- [x] (Optional) `animateWindowSize` anchored-by-`Stopwatch` for an even smoother native resize.
 
-- `CoreStore::garbage_collect_old_versions(core_id, inactive_retention)` now
-  keeps the active version plus the newest inactive version by default. It only
-  deletes directories that are valid store segments and contain
-  `core-manifest.json`; staging folders and unknown debris are left alone for
-  diagnosis.
-- `promote_staged()` calls GC after a successful active-version promotion, so
-  normal installs and manual-bundle provisioning converge to active + rollback
-  retention automatically.
-- Regression coverage: installing `1.0.0 -> 1.1.0 -> 1.2.0` leaves `1.2.0`
-  active and `1.1.0` as rollback, then an explicit retention `0` GC removes the
-  inactive copy.
+## 5. Future cores + release hardening  (~25%)
 
-Do not reintroduce the old app-local `native/bundled` executable lookup in the
-launch path; `app_local_bundle_dir()` is now only a provisioning source for the
-store, not a launch target.
+- [x] Launch descriptors exist for sing-box / xray-core / hysteria2 (data only).
+- [ ] Real adapters for sing-box / xray-core / hysteria2 (parse/build/import).
+- [x] Authenticode signature verification (`poh_core_store::signature`):
+      `authenticode_status(path)` (WinVerifyTrust); install records the real
+      `signature_status`; `verify_core` enforces a trusted signature when the store
+      is built with `.with_signature_required(true)`. See "How to use signature
+      verification" below.
+- [~] Turn signature enforcement ON for downloadable cores: mechanism is wired —
+      `resolve_store_core` reads `signature_preferred` per source and passes it to
+      `CoreStore::with_signature_required`; NaiveProxy stays `false` (unsigned);
+      planned cores (sing-box, xray, hysteria2) have `signature_preferred: true`
+      and will enforce automatically when promoted to `active`.
+      Remaining: optional pinned-publisher (signer subject) check.
+- [~] Fault-injection / race tests (some unit coverage exists; full matrix from process-lifecycle.md S14 pending).
+
+---
+
+## 6. Per-core CLI commands (WS-A/C/D)  (~60%)
+
+Plan: `LLM_Cloud/per-core-and-routing-plan.md`. Agent: `LLM_Cloud/agents/claude/`.
+
+- [x] **C0** Контракт `contracts/cli-contract.md` зафиксирован; Вариант A пресетов выбран;
+      Codex уведомлён в `handoff/INBOX-codex.md`.
+- [x] **C1** `desktop-list-profiles <state-path>` → `{profiles:[{id,name,core_id,host,summary}]}`.
+- [x] **C2** Generic import/start верифицированы; тест `naiveproxy_import_uses_generic_core_path`.
+- [x] **C3** `desktop-core-schema <core_id>` → `{core_id, sections:[...]}` из `settings_schema()`.
+- [x] **C4** `desktop-validate-profile <state>` (stdin JSON fields) → `{ok, error?, warnings}`;
+      `desktop-update-profile <state>` → сохранение + DPAPI-секреты. Пароли не в `core_config`.
+- [x] **C5** `desktop-core-modes <core_id>` → `{available, default, disabled}` из `CoreCapabilities`.
+- [x] **C6** `RoutePreset`/`RoutePresetRules` + три поля в `DesktopState` (`RoutePresetsByCore`,
+      `ActiveRouteByCore`, `ActiveModeByCore`) с serde default. Round-trip тест.
+
+Verified 2026-06-19: `cargo fmt --check` clean; `cargo clippy -D warnings` clean;
+`cargo test --workspace` — 114 tests, 0 failed.
+
+---
+
+## Recommended next steps (priority order)
+
+1. **Real adapters for sing-box / xray-core / hysteria2** — parse/build/import; the
+   launch infrastructure and signature enforcement wiring are already in place.
+2. **Pinned-publisher (signer subject) check** — optional but recommended before
+   promoting planned cores to `active`; extends current signature enforcement with a
+   per-source expected signer subject (CryptQueryObject + CertGetNameString).
+3. **Fault-injection / race tests** — full matrix from process-lifecycle.md §14.
+4. **(Optional) `animateWindowSize` anchored-by-Stopwatch** — smoother native resize.
+
+## Implementation notes (do not regress)
+
+- Launch path is core-agnostic: it resolves a verified core from the managed store.
+  `app_local_bundle_dir()` is only a provisioning source for TrustTunnel, not a launch target.
+- GC runs inside `promote_staged()` after a successful active-version promotion; it only
+  deletes valid version dirs containing `core-manifest.json` (staging/debris left for diagnosis).
+- Secrets stay in DPAPI `ProtectedSecrets`; do not reintroduce plaintext state.
+- Desktop window has two fixed sizes (`kExpandedWindow` 960x660 / `kCompactWindow` 360x650),
+  shared by the native resize and the in-window `OverflowBox` mask — keep them in sync.
+- NaiveProxy proxy password must be URL-encoded in the secret value, never stored in the profile.
+
+### How to use signature verification (added 2026-06-18)
+
+What it is: a second integrity layer on top of SHA-256 pinning. SHA-256 proves the
+bytes are exactly what we pinned; Authenticode proves they carry a publisher
+signature Windows trusts. Code: `crates/poh_core_store/src/signature.rs`.
+
+API:
+- `poh_core_store::authenticode_status(path) -> SignatureStatus`
+  (`Verified` = signed + chain trusted; `Unsigned` = no embedded signature;
+  `Unknown` = signed-but-untrusted/expired/tampered, non-PE, or non-Windows build).
+  **Treat `Unknown` as "not trusted".**
+- `CoreStore::with_signature_required(true)` — builder flag. When set, `verify_core`
+  fails with `CoreStoreError::SignatureRejected` unless the executable is `Verified`.
+  Default is `false` (current bundled TrustTunnel / naive cores are unsigned).
+- `install()` / `install_manual_bundle()` already record the real `signature_status`
+  into the stored `core-manifest.json` (via `promote_staged`), so the UI can show
+  "signed / unsigned" without re-running verification.
+
+How it is wired (done 2026-06-18):
+- `desktop_state.rs::resolve_store_core` looks up the source for the requested
+  `core_id` in `embedded_trusted_sources()` and reads `signature_preferred`.
+  If `true` → `CoreStore::new(root).with_signature_required(true)`; otherwise the
+  store is built without signature enforcement (SHA-256 pinning remains in effect).
+- `resolve_trusttunnel_core` (bundled path) is NOT affected — it never passes
+  through `resolve_store_core`.
+- `trusted-sources.json`: NaiveProxy `signature_preferred: false` (klzgrad ships
+  unsigned binaries); sing-box, xray-core, hysteria2 remain `true` and will
+  auto-enforce when promoted to `active`.
+- Catalog caveat: WinVerifyTrust checks the EMBEDDED signature only (not `.cat`
+  catalog sigs). Third-party cores ship embedded-signed; that is correct behavior.
+- Next step (optional): extract the signer subject (CryptQueryObject +
+  CertGetNameString) and pin it per source for a stronger publisher-identity check.
+
+Tests: `authenticode_status_never_verifies_unsigned_bytes`,
+`verify_core_enforces_signature_only_when_required` (both `#[cfg(windows)]`).
+The `Verified` branch is exercised by real signed cores in production; a unit test
+can't rely on a guaranteed embedded-signed file being present on every machine.
+
+### How to use the DNS network safety-net (added 2026-06-18)
+
+Why: a TUN core (TrustTunnel with `change_system_dns`) points system DNS at a
+tunnel resolver. On a clean stop the core restores it; on a force-kill/crash it
+does not, so the user is left with no working DNS. The safety-net makes the APP
+record the pre-session DNS and force it back on every teardown.
+
+What is built (`crates/poh_cli/src/network_effects.rs`):
+- `NetworkEffectsState` is now a generic ledger: `system_proxy: Option<SystemProxyLease>`
+  + `dns: Option<DnsLease>` (both serialized in `session.json`, both restored by
+  `restore_network_effects`, which now attempts ALL effects even if one fails).
+- `DnsLease { interfaces: Vec<DnsInterfaceSnapshot>, applied_at_unix_ms }`;
+  `DnsInterfaceSnapshot { interface, family (ipv4/ipv6), config: Dhcp | Static{servers} }`.
+- `dns_restore_commands(&DnsLease) -> Vec<Vec<String>>` is a PURE builder of the
+  `netsh interface <fam> ...` argv (DHCP -> `source=dhcp`; Static -> `set ... static
+  <first> primary validate=no` then `add ... <n> index=K validate=no`). Fully unit
+  tested without touching the network. `restore_dns_lease` (cfg windows) runs them.
+- Already flows through every teardown: `clear_persisted_session` ->
+  `restore_network_effects`, used by stop / `desktop-session-reset` / reconcile.
+
+What remains (the wiring step — do this to activate it):
+1. At session start, BEFORE launching a TUN core that changes DNS, snapshot the
+   current DNS of the affected interface(s) into a `DnsLease` and store it in
+   `session.network_effects.dns` (alongside how `prepare_system_proxy` is stored).
+   Implement `read_dns_lease(interfaces)` with `netsh interface <fam> show dnsservers
+   name=<if>` + a pure `parse_dns_servers(output)` helper (unit-test the parser the
+   same way `dns_restore_commands` is tested).
+2. Interface selection: snapshot the active/default-route adapter(s). Start simple
+   (the adapter carrying the default route) and expand if needed. Do NOT snapshot the
+   TUN adapter itself.
+3. Routes / kill-switch firewall rules follow the SAME record->restore pattern: add
+   `routes: Vec<RouteLease>` / `firewall: Vec<FirewallLease>` to the ledger with their
+   own pure command builders + tests, restored in `restore_network_effects`.
+
+Tests: `dns_lease_round_trips_and_marks_state_non_empty`,
+`dns_restore_commands_for_dhcp_resets_to_dhcp`,
+`dns_restore_commands_for_static_sets_primary_then_adds`,
+`dns_restore_commands_static_without_servers_falls_back_to_dhcp`,
+`dns_restore_commands_uses_ipv6_token`.
+</content>
