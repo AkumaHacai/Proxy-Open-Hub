@@ -240,7 +240,7 @@ pub fn start_desktop_session(
 
     let state = load_desktop_state(state_path)?;
     let secrets = state.resolved_secrets()?;
-    let desktop_profile = state
+    let mut desktop_profile = state
         .profiles
         .into_iter()
         .find(|profile| profile.id == profile_id)
@@ -258,6 +258,16 @@ pub fn start_desktop_session(
         }
         None => None,
     };
+    // T1/T12: Apply active_mode to listener materialization for legacy TT profiles.
+    // NaiveProxy and custom-config profiles embed their listener in core_config directly.
+    if desktop_profile.core_config.is_none() {
+        if let Some(ref mode) = active_mode {
+            desktop_profile.listener.mode = match mode {
+                RoutingModeKind::Tun => 0,
+                RoutingModeKind::SystemProxy | RoutingModeKind::LocalProxyGate => 1,
+            };
+        }
+    }
     let needs_dns_snapshot = should_snapshot_dns(&desktop_profile);
     let needs_firewall_snapshot = should_snapshot_firewall(&desktop_profile);
     let system_proxy_config = resolve_system_proxy_config(&desktop_profile, active_mode)?;
@@ -3225,7 +3235,17 @@ pub fn supervise_desktop_session(
     gui_pid: Option<u32>,
 ) -> Result<(), DesktopStateError> {
     // ── Phase 1: start the core via the existing session path ─────────────────
-    let start = start_desktop_session(state_path, profile_id)?;
+    // T2: if the core exits immediately during startup (e.g. TUN driver not yet
+    // ready on first use), retry once after a brief delay. The Faulted session
+    // left by the first attempt is cleaned up by reconcile on the retry.
+    let start = match start_desktop_session(state_path, profile_id) {
+        Err(DesktopStateError::CoreExitedDuringStartup(..)) => {
+            eprintln!("[supervisor] core exited during startup, retrying in 300 ms");
+            thread::sleep(Duration::from_millis(300));
+            start_desktop_session(state_path, profile_id)?
+        }
+        other => other?,
+    };
     let pid = start.pid;
 
     // ── Phase 2: Job Object (best-effort) ─────────────────────────────────────

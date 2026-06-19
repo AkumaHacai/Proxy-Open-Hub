@@ -620,6 +620,7 @@ fn desktop_session_plan(args: &[String]) -> ExitCode {
         }
         Err(error) => {
             eprintln!("Desktop session plan failed: {error}");
+            println!("{}", serde_json::json!({ "error": error.to_string() }));
             ExitCode::from(1)
         }
     }
@@ -641,6 +642,7 @@ fn desktop_session_start(args: &[String]) -> ExitCode {
         }
         Err(error) => {
             eprintln!("Desktop session start failed: {error}");
+            println!("{}", serde_json::json!({ "error": error.to_string() }));
             ExitCode::from(1)
         }
     }
@@ -657,6 +659,7 @@ fn desktop_session_stop() -> ExitCode {
         }
         Err(error) => {
             eprintln!("Desktop session stop failed: {error}");
+            println!("{}", serde_json::json!({ "error": error.to_string() }));
             ExitCode::from(1)
         }
     }
@@ -673,6 +676,7 @@ fn desktop_session_reset() -> ExitCode {
         }
         Err(error) => {
             eprintln!("Desktop session reset failed: {error}");
+            println!("{}", serde_json::json!({ "error": error.to_string() }));
             ExitCode::from(1)
         }
     }
@@ -689,6 +693,7 @@ fn desktop_session_status() -> ExitCode {
         }
         Err(error) => {
             eprintln!("Desktop session status failed: {error}");
+            println!("{}", serde_json::json!({ "error": error.to_string() }));
             ExitCode::from(1)
         }
     }
@@ -705,6 +710,7 @@ fn desktop_session_log() -> ExitCode {
         }
         Err(error) => {
             eprintln!("Desktop session log failed: {error}");
+            println!("{}", serde_json::json!({ "error": error.to_string() }));
             ExitCode::from(1)
         }
     }
