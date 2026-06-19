@@ -453,10 +453,15 @@ class BackendDisabledRouteMode {
 /// calling [stop], the OS pipe closure triggers the supervisor's stdin-EOF
 /// handler, which stops the core automatically.
 class SupervisedSession {
-  SupervisedSession({required this.session, required this.process});
+  SupervisedSession({
+    required this.session,
+    required this.process,
+    required this.stdoutLines,
+  });
 
   final BackendSession session;
   final Process process;
+  final Stream<String> stdoutLines;
 
   /// Sends a stop command to the supervisor and waits for it to exit.
   Future<void> stop() async {
@@ -724,36 +729,45 @@ class BackendSessionService {
       runInShell: false,
     );
 
-    // Wait for the first stdout line; it must be {"type":"started",...}.
+    final stdoutLines = process.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .asBroadcastStream();
+    final stderrFuture = process.stderr.transform(utf8.decoder).join();
+
+    // Wait for the first stdout JSON event; it must be {"type":"started",...}.
     // If the supervisor exits before emitting it, something went wrong.
-    final startedEvent = await _waitForSupervisorStart(process);
+    final startedEvent = await _waitForSupervisorStart(
+      process,
+      stdoutLines,
+      stderrFuture,
+    );
     return SupervisedSession(
       session: BackendSession.fromJson(startedEvent),
       process: process,
+      stdoutLines: stdoutLines,
     );
   }
 
   /// Parses the supervisor's stdout until a `{"type":"started"}` event arrives
   /// or the process exits.  Throws [BackendSessionException] on failure.
-  Future<Map<String, dynamic>> _waitForSupervisorStart(Process process) async {
-    final stdoutLines =
-        process.stdout.transform(utf8.decoder).transform(const LineSplitter());
-    final stderrFuture = process.stderr.transform(utf8.decoder).join();
-
+  Future<Map<String, dynamic>> _waitForSupervisorStart(
+    Process process,
+    Stream<String> stdoutLines,
+    Future<String> stderrFuture,
+  ) async {
     await for (final line in stdoutLines) {
       if (line.trim().isEmpty) continue;
-      final Map<String, dynamic> event;
-      try {
-        final decoded = jsonDecode(line);
-        if (decoded is! Map<String, dynamic>) continue;
-        event = decoded;
-      } catch (_) {
-        continue;
-      }
+      final event = _decodeBackendJsonObjectOrNull(line);
+      if (event == null) continue;
 
       final type = event['type'] as String?;
       if (type == 'started') {
         return event;
+      }
+      final error = event['error']?.toString();
+      if (error != null && error.isNotEmpty) {
+        throw BackendSessionException(error);
       }
       // Ignore non-started events (e.g. unexpected early stopping/faulted).
     }
@@ -825,10 +839,7 @@ class BackendSessionService {
       );
     }
 
-    final decoded = jsonDecode(result.stdout.toString());
-    if (decoded is! Map<String, dynamic>) {
-      throw const BackendSessionException('Rust backend returned invalid JSON');
-    }
+    final decoded = _decodeBackendJsonObject(result.stdout.toString());
 
     return decoded;
   }
@@ -867,12 +878,55 @@ class BackendSessionService {
       );
     }
 
-    final decoded = jsonDecode(stdout);
-    if (decoded is! Map<String, dynamic>) {
+    final decoded = _decodeBackendJsonObject(stdout);
+
+    return decoded;
+  }
+
+  Map<String, dynamic> _decodeBackendJsonObject(String output) {
+    final decoded = _decodeBackendJsonObjectOrNull(output);
+    if (decoded == null) {
       throw const BackendSessionException('Rust backend returned invalid JSON');
     }
 
+    final error = decoded['error']?.toString();
+    if (error != null && error.isNotEmpty) {
+      throw BackendSessionException(error);
+    }
     return decoded;
+  }
+
+  Map<String, dynamic>? _decodeBackendJsonObjectOrNull(String output) {
+    for (final candidate in _jsonCandidates(output)) {
+      try {
+        final decoded = jsonDecode(candidate);
+        if (decoded is Map<String, dynamic>) {
+          return decoded;
+        }
+      } on FormatException {
+        continue;
+      }
+    }
+    return null;
+  }
+
+  Iterable<String> _jsonCandidates(String output) sync* {
+    final trimmed = output.trim();
+    if (trimmed.isEmpty) return;
+    yield trimmed;
+
+    for (final line in const LineSplitter().convert(output)) {
+      final lineText = line.trim();
+      if (lineText.startsWith('{') && lineText.endsWith('}')) {
+        yield lineText;
+      }
+    }
+
+    final start = trimmed.indexOf('{');
+    final end = trimmed.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      yield trimmed.substring(start, end + 1);
+    }
   }
 
   Future<File?> _findPohCli() async {

@@ -57,6 +57,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp>
   final String _debugCoreId = Platform.environment['POH_DEBUG_CORE'] ?? '';
   var _animationsEnabled = true;
   var _animationDurationMs = 520;
+  var _themeRevealInFlight = false;
   var _density = 'comfortable';
   var _startupMode = 'expanded';
   var _defaultCore = 'TrustTunnel';
@@ -123,6 +124,14 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp>
   String get _activeRoute {
     return _routesByCore[_activeCore.id] ??
         _defaultRouteForCore(_activeCore.id);
+  }
+
+  String get _activeMode {
+    return _activeModeByCore[_activeCore.id] ?? 'tun';
+  }
+
+  List<RoutePreset> get _activeRoutePresets {
+    return _routePresetsByCore[_activeCore.id] ?? RoutePreset.defaults;
   }
 
   List<ServerProfile> get _activeServers {
@@ -331,6 +340,10 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp>
                         setState(() => _overlay = _DesktopOverlay.settings);
                       },
                       activeRoute: _activeRoute,
+                      activeMode: _activeMode,
+                      routePresets: _activeRoutePresets,
+                      onSelectRouteMode: _selectActiveMode,
+                      onSelectRoutePreset: _selectActivePreset,
                       onOpenRoutes: () {
                         setState(() => _overlay = _DesktopOverlay.routes);
                       },
@@ -700,6 +713,29 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp>
     );
   }
 
+  void _selectActiveMode(String mode) {
+    final nextModes = Map<String, String>.of(_activeModeByCore)
+      ..[_activeCore.id] = mode;
+    _applySettings(_settings.copyWith(activeModeByCore: nextModes));
+  }
+
+  void _selectActivePreset(RoutePreset preset) {
+    final coreId = _activeCore.id;
+    final nextRoutes = Map<String, String>.of(_routesByCore)
+      ..[coreId] = preset.id;
+    final nextRules = Map<String, RouteRules>.of(_routeRulesByCore)
+      ..[coreId] = preset.rules;
+
+    _applySettings(
+      _settings.copyWith(
+        defaultRoute:
+            coreId == 'trusttunnel' ? preset.id : _settings.defaultRoute,
+        routesByCore: nextRoutes,
+        routeRulesByCore: nextRules,
+      ),
+    );
+  }
+
   String _defaultRouteForCore(String coreId) {
     return switch (coreId) {
       'naiveproxy' => 'Proxy only',
@@ -822,7 +858,8 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp>
     }
   }
 
-  Duration get _morphDuration => _motionDuration;
+  Duration get _morphDuration =>
+      _themeRevealInFlight ? Duration.zero : _motionDuration;
 
   void _toggleCompact() {
     final compact = !_compact;
@@ -862,6 +899,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp>
       return;
     }
 
+    setState(() => _themeRevealInFlight = true);
     await reveal.revealTo(
       themeMode: mode,
       accent: accent,
@@ -871,7 +909,10 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp>
       return;
     }
 
-    setState(() => _themeMode = mode);
+    setState(() {
+      _themeMode = mode;
+      _themeRevealInFlight = false;
+    });
     unawaited(_saveSettings());
     await WidgetsBinding.instance.endOfFrame;
     reveal.clearReveal();
@@ -901,13 +942,10 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp>
       _supervisorSession = supervised;
 
       // Listen for supervisor events (crash detection, clean stop confirmation).
-      supervised.process.stdout
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen(
-            (line) => _onSupervisorEvent(line, id),
-            onDone: () => _onSupervisorExited(id),
-          );
+      supervised.stdoutLines.listen(
+        (line) => _onSupervisorEvent(line, id),
+        onDone: () => _onSupervisorExited(id),
+      );
 
       _patchTab(id, phase: ConnectionPhase.authenticating);
       setState(() {
@@ -1171,8 +1209,9 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp>
             !_working &&
             status.running &&
             status.session != null) {
-          // External/orphaned session detected — adopt it.
-          _adoptSession(status.session!);
+          // External/orphaned session detected. Update the session tab without
+          // stealing focus from the core the user is currently inspecting.
+          _adoptSession(status.session!, focus: false);
         }
       } catch (error) {
         if (mounted && _connected) {
@@ -1254,7 +1293,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp>
   ///
   /// Rust's [desktop_session_status] already verified [creation_time_100ns], so
   /// the session PID is guaranteed to belong to our core process.
-  void _adoptSession(BackendSession session) {
+  void _adoptSession(BackendSession session, {bool focus = true}) {
     // Find or create a tab for the session's core.
     var tabIdx = _tabs.indexWhere((t) => t.coreId == session.coreId);
     if (tabIdx < 0) {
@@ -1267,12 +1306,16 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp>
         connectedAt: null,
       ));
       tabIdx = _tabs.length - 1;
-      _activeTabId = newId;
+      if (focus) {
+        _activeTabId = newId;
+      }
     }
 
     final tab = _tabs[tabIdx];
     setState(() {
-      _activeTabId = tab.id;
+      if (focus) {
+        _activeTabId = tab.id;
+      }
       _tabs[tabIdx] = tab.copyWith(
         selectedServerId: session.profileId,
         phase: ConnectionPhase.connected,
@@ -1281,7 +1324,7 @@ class _ProxyOpenHubAppState extends State<ProxyOpenHubApp>
       );
       _supervisorSession = null;
       _connectionMessage = null;
-      _progress = 1.0;
+      _progress = focus ? 1.0 : _progress;
       _download = List<double>.filled(16, 0);
       _upload = List<double>.filled(16, 0);
     });
@@ -1329,6 +1372,8 @@ class _DesktopWindow extends StatelessWidget {
     required this.connectionMessage,
     required this.themeMode,
     required this.activeRoute,
+    required this.activeMode,
+    required this.routePresets,
     required this.motionDuration,
     required this.expandReveal,
     required this.onToggleCompact,
@@ -1342,6 +1387,8 @@ class _DesktopWindow extends StatelessWidget {
     required this.onEditServer,
     required this.onToggleConnection,
     required this.onOpenSettings,
+    required this.onSelectRouteMode,
+    required this.onSelectRoutePreset,
     required this.onOpenRoutes,
     required this.onOpenLogs,
     required this.onOpenImportProfile,
@@ -1364,6 +1411,8 @@ class _DesktopWindow extends StatelessWidget {
   final String? connectionMessage;
   final PohThemeMode themeMode;
   final String activeRoute;
+  final String activeMode;
+  final List<RoutePreset> routePresets;
   final Duration motionDuration;
   final int expandReveal;
   final VoidCallback onToggleCompact;
@@ -1377,6 +1426,8 @@ class _DesktopWindow extends StatelessWidget {
   final ValueChanged<ServerProfile> onEditServer;
   final VoidCallback onToggleConnection;
   final VoidCallback onOpenSettings;
+  final ValueChanged<String> onSelectRouteMode;
+  final ValueChanged<RoutePreset> onSelectRoutePreset;
   final VoidCallback onOpenRoutes;
   final VoidCallback onOpenLogs;
   final VoidCallback onOpenImportProfile;
@@ -1440,6 +1491,8 @@ class _DesktopWindow extends StatelessWidget {
                   connectionMessage: connectionMessage,
                   themeMode: themeMode,
                   activeRoute: activeRoute,
+                  activeMode: activeMode,
+                  routePresets: routePresets,
                   motionDuration: motionDuration,
                   expandReveal: expandReveal,
                   onSelectServer: onSelectServer,
@@ -1447,6 +1500,8 @@ class _DesktopWindow extends StatelessWidget {
                   onToggleConnection: onToggleConnection,
                   onToggleTheme: onToggleTheme,
                   onOpenSettings: onOpenSettings,
+                  onSelectRouteMode: onSelectRouteMode,
+                  onSelectRoutePreset: onSelectRoutePreset,
                   onOpenRoutes: onOpenRoutes,
                   onOpenLogs: onOpenLogs,
                   onOpenImportProfile: onOpenImportProfile,
@@ -1603,6 +1658,8 @@ class _MorphingBody extends StatelessWidget {
     required this.connectionMessage,
     required this.themeMode,
     required this.activeRoute,
+    required this.activeMode,
+    required this.routePresets,
     required this.motionDuration,
     required this.expandReveal,
     required this.onSelectServer,
@@ -1610,6 +1667,8 @@ class _MorphingBody extends StatelessWidget {
     required this.onToggleConnection,
     required this.onToggleTheme,
     required this.onOpenSettings,
+    required this.onSelectRouteMode,
+    required this.onSelectRoutePreset,
     required this.onOpenRoutes,
     required this.onOpenLogs,
     required this.onOpenImportProfile,
@@ -1629,6 +1688,8 @@ class _MorphingBody extends StatelessWidget {
   final String? connectionMessage;
   final PohThemeMode themeMode;
   final String activeRoute;
+  final String activeMode;
+  final List<RoutePreset> routePresets;
   final Duration motionDuration;
   final int expandReveal;
   final ValueChanged<String> onSelectServer;
@@ -1636,6 +1697,8 @@ class _MorphingBody extends StatelessWidget {
   final VoidCallback onToggleConnection;
   final ValueChanged<Offset> onToggleTheme;
   final VoidCallback onOpenSettings;
+  final ValueChanged<String> onSelectRouteMode;
+  final ValueChanged<RoutePreset> onSelectRoutePreset;
   final VoidCallback onOpenRoutes;
   final VoidCallback onOpenLogs;
   final VoidCallback onOpenImportProfile;
@@ -1716,8 +1779,12 @@ class _MorphingBody extends StatelessWidget {
                       connected: connected,
                       connectionMessage: connectionMessage,
                       activeRoute: activeRoute,
+                      activeMode: activeMode,
+                      routePresets: routePresets,
                       motionDuration: motionDuration,
                       onOpenRoutes: onOpenRoutes,
+                      onSelectRouteMode: onSelectRouteMode,
+                      onSelectRoutePreset: onSelectRoutePreset,
                       progress: progress,
                       working: working,
                       onToggleConnection: onToggleConnection,
@@ -1777,8 +1844,12 @@ class _ExpandedDetailPane extends StatelessWidget {
     required this.connected,
     required this.connectionMessage,
     required this.activeRoute,
+    required this.activeMode,
+    required this.routePresets,
     required this.motionDuration,
     required this.onOpenRoutes,
+    required this.onSelectRouteMode,
+    required this.onSelectRoutePreset,
     required this.progress,
     required this.working,
     required this.onToggleConnection,
@@ -1792,8 +1863,12 @@ class _ExpandedDetailPane extends StatelessWidget {
   final bool connected;
   final String? connectionMessage;
   final String activeRoute;
+  final String activeMode;
+  final List<RoutePreset> routePresets;
   final Duration motionDuration;
   final VoidCallback onOpenRoutes;
+  final ValueChanged<String> onSelectRouteMode;
+  final ValueChanged<RoutePreset> onSelectRoutePreset;
   final double progress;
   final bool working;
   final VoidCallback? onToggleConnection;
@@ -1883,7 +1958,11 @@ class _ExpandedDetailPane extends StatelessWidget {
               core: activeCore,
               server: selectedServer,
               activeRoute: activeRoute,
+              activeMode: activeMode,
+              routePresets: routePresets,
               onOpenRoutes: onOpenRoutes,
+              onSelectRouteMode: onSelectRouteMode,
+              onSelectRoutePreset: onSelectRoutePreset,
             ),
           ),
         ],
@@ -2493,46 +2572,64 @@ class _ServerList extends StatelessWidget {
     }
 
     if (servers.isEmpty) {
-      return ListView(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        children: [
-          const _SidebarMessage(
-            title: 'No servers for this core',
-            subtitle: 'Import or add a profile for the active core',
-            compact: true,
+      return SizedBox.expand(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onSecondaryTapUp: (details) => _showEmptyServerListMenu(
+            context,
+            details.globalPosition,
+            onOpenImportProfile,
           ),
-          if (!compact) ...[
-            const SizedBox(height: 10),
-            _AddServerButton(
-              compact: compact,
-              onPressed: onOpenImportProfile,
-            ),
-          ],
-        ],
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            children: [
+              const _SidebarMessage(
+                title: 'No servers for this core',
+                subtitle: 'Import or add a profile for the active core',
+                compact: true,
+              ),
+              if (!compact) ...[
+                const SizedBox(height: 10),
+                _AddServerButton(
+                  compact: compact,
+                  onPressed: onOpenImportProfile,
+                ),
+              ],
+            ],
+          ),
+        ),
       );
     }
 
-    return ListView.separated(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      itemCount: servers.length + (compact ? 0 : 1),
-      separatorBuilder: (_, __) => const SizedBox(height: 6),
-      itemBuilder: (context, index) {
-        if (index == servers.length) {
-          return _AddServerButton(
-            compact: compact,
-            onPressed: onOpenImportProfile,
-          );
-        }
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onSecondaryTapUp: (details) => _showEmptyServerListMenu(
+        context,
+        details.globalPosition,
+        onOpenImportProfile,
+      ),
+      child: ListView.separated(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        itemCount: servers.length + (compact ? 0 : 1),
+        separatorBuilder: (_, __) => const SizedBox(height: 6),
+        itemBuilder: (context, index) {
+          if (index == servers.length) {
+            return _AddServerButton(
+              compact: compact,
+              onPressed: onOpenImportProfile,
+            );
+          }
 
-        final server = servers[index];
-        return _ServerCard(
-          server: server,
-          selected: server.id == selectedServer.id,
-          connectedHere: connected && server.id == activeTab.selectedServerId,
-          onPressed: () => onSelectServer(server.id),
-          onEdit: () => onEditServer(server),
-        );
-      },
+          final server = servers[index];
+          return _ServerCard(
+            server: server,
+            selected: server.id == selectedServer.id,
+            connectedHere: connected && server.id == activeTab.selectedServerId,
+            onPressed: () => onSelectServer(server.id),
+            onEdit: () => onEditServer(server),
+          );
+        },
+      ),
     );
   }
 }
@@ -2601,104 +2698,274 @@ class _ServerCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
-    return Material(
-      color: selected ? palette.accentSoft : Colors.transparent,
-      borderRadius: BorderRadius.circular(14),
-      child: InkWell(
+    return GestureDetector(
+      onSecondaryTapUp: (details) => _showServerCardMenu(
+        context,
+        details.globalPosition,
+        onEdit,
+      ),
+      child: Material(
+        color: selected ? palette.accentSoft : Colors.transparent,
         borderRadius: BorderRadius.circular(14),
-        onTap: onPressed,
-        child: Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: selected
-                  ? palette.accent.withValues(alpha: 0.38)
-                  : Colors.transparent,
-            ),
-          ),
-          child: Row(
-            children: [
-              _FlagChip(
-                code: server.countryCode,
-                selected: selected,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: onPressed,
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: selected
+                    ? palette.accent.withValues(alpha: 0.38)
+                    : Colors.transparent,
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Flexible(
-                          child: Text(
-                            server.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: palette.text,
-                              fontSize: 13.5,
-                              fontWeight: FontWeight.w800,
+            ),
+            child: Row(
+              children: [
+                _FlagChip(
+                  code: server.countryCode,
+                  selected: selected,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              server.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: palette.text,
+                                fontSize: 13.5,
+                                fontWeight: FontWeight.w800,
+                              ),
                             ),
+                          ),
+                          if (connectedHere) ...[
+                            const SizedBox(width: 6),
+                            Text(
+                              'ACTIVE',
+                              style: TextStyle(
+                                color: palette.accent,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        server.host,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: palette.muted,
+                          fontSize: 11.5,
+                          fontFamily: 'monospace',
+                        ),
+                      ),
+                      if (server.tlsVerificationDisabled) ...[
+                        const SizedBox(height: 5),
+                        const _TlsWarningChip(compact: true),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _PingLoad(server: server),
+                    const SizedBox(height: 6),
+                    Tooltip(
+                      message: 'Edit server',
+                      child: InkWell(
+                        customBorder: const CircleBorder(),
+                        onTap: onEdit,
+                        child: Padding(
+                          padding: const EdgeInsets.all(4),
+                          child: Icon(
+                            Icons.settings_rounded,
+                            color: palette.muted,
+                            size: 15,
                           ),
                         ),
-                        if (connectedHere) ...[
-                          const SizedBox(width: 6),
-                          Text(
-                            'ACTIVE',
-                            style: TextStyle(
-                              color: palette.accent,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      server.host,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: palette.muted,
-                        fontSize: 11.5,
-                        fontFamily: 'monospace',
                       ),
                     ),
-                    if (server.tlsVerificationDisabled) ...[
-                      const SizedBox(height: 5),
-                      const _TlsWarningChip(compact: true),
-                    ],
                   ],
                 ),
-              ),
-              const SizedBox(width: 8),
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _PingLoad(server: server),
-                  const SizedBox(height: 6),
-                  Tooltip(
-                    message: 'Edit server',
-                    child: InkWell(
-                      customBorder: const CircleBorder(),
-                      onTap: onEdit,
-                      child: Padding(
-                        padding: const EdgeInsets.all(4),
-                        child: Icon(
-                          Icons.settings_rounded,
-                          color: palette.muted,
-                          size: 15,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
+              ],
+            ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+enum _ServerCardMenuAction { edit }
+
+enum _EmptyServerListMenuAction { pasteImport, importToml }
+
+void _showServerCardMenu(
+  BuildContext context,
+  Offset globalPosition,
+  VoidCallback onEdit,
+) {
+  unawaited(() async {
+    final action = await _showPohMenu<_ServerCardMenuAction>(
+      context: context,
+      globalPosition: globalPosition,
+      items: const [
+        PopupMenuItem<_ServerCardMenuAction>(
+          value: _ServerCardMenuAction.edit,
+          height: 52,
+          child: _PohContextMenuItem(
+            icon: Icons.tune_rounded,
+            title: 'Edit Configuration',
+            subtitle:
+                'Edit connection parameters, port, or encryption keys of the selected server.',
+          ),
+        ),
+      ],
+    );
+
+    if (action == _ServerCardMenuAction.edit) {
+      onEdit();
+    }
+  }());
+}
+
+void _showEmptyServerListMenu(
+  BuildContext context,
+  Offset globalPosition,
+  VoidCallback onOpenImportProfile,
+) {
+  unawaited(() async {
+    final action = await _showPohMenu<_EmptyServerListMenuAction>(
+      context: context,
+      globalPosition: globalPosition,
+      items: const [
+        PopupMenuItem<_EmptyServerListMenuAction>(
+          value: _EmptyServerListMenuAction.pasteImport,
+          height: 52,
+          child: _PohContextMenuItem(
+            icon: Icons.content_paste_rounded,
+            title: 'Paste (Import)',
+            subtitle:
+                'Add a server by importing a connection link or JSON configuration from the clipboard.',
+          ),
+        ),
+        PopupMenuItem<_EmptyServerListMenuAction>(
+          value: _EmptyServerListMenuAction.importToml,
+          height: 52,
+          child: _PohContextMenuItem(
+            icon: Icons.data_object_rounded,
+            title: 'Import TOML',
+            subtitle: 'Open the import dialog and paste a TOML profile.',
+          ),
+        ),
+      ],
+    );
+
+    if (action != null) {
+      onOpenImportProfile();
+    }
+  }());
+}
+
+Future<T?> _showPohMenu<T>({
+  required BuildContext context,
+  required Offset globalPosition,
+  required List<PopupMenuEntry<T>> items,
+}) {
+  final palette = PohPalette.of(context);
+  final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+  final position = RelativeRect.fromRect(
+    Rect.fromLTWH(globalPosition.dx, globalPosition.dy, 0, 0),
+    Offset.zero & overlay.size,
+  );
+
+  final dark = Theme.of(context).brightness == Brightness.dark;
+  return showMenu<T>(
+    context: context,
+    position: position,
+    color: palette.surface,
+    elevation: 16,
+    shadowColor: Colors.black.withValues(alpha: dark ? 0.45 : 0.18),
+    surfaceTintColor: Colors.transparent,
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(18),
+      side: BorderSide(color: palette.border),
+    ),
+    items: items,
+  );
+}
+
+class _PohContextMenuItem extends StatelessWidget {
+  const _PohContextMenuItem({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = PohPalette.of(context);
+    return SizedBox(
+      width: 260,
+      child: Row(
+        children: [
+          Container(
+            width: 30,
+            height: 30,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: palette.accentSoft,
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: Icon(icon, color: palette.accent, size: 16),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: palette.text,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: palette.muted,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -2895,13 +3162,21 @@ class _DetailBar extends StatelessWidget {
     required this.core,
     required this.server,
     required this.activeRoute,
+    required this.activeMode,
+    required this.routePresets,
     required this.onOpenRoutes,
+    required this.onSelectRouteMode,
+    required this.onSelectRoutePreset,
   });
 
   final CoreSpec core;
   final ServerProfile server;
   final String activeRoute;
+  final String activeMode;
+  final List<RoutePreset> routePresets;
   final VoidCallback onOpenRoutes;
+  final ValueChanged<String> onSelectRouteMode;
+  final ValueChanged<RoutePreset> onSelectRoutePreset;
 
   @override
   Widget build(BuildContext context) {
@@ -2913,10 +3188,63 @@ class _DetailBar extends StatelessWidget {
         label: 'PING',
         value: server.pingMs <= 0 ? '-' : '${server.pingMs} ms',
       ),
-      const _DetailPill(label: 'SESSION', value: '-'),
     ];
 
-    Widget routeSelector() {
+    Widget routeModeSelector() {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            'MODE',
+            style: TextStyle(
+              color: palette.muted,
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(width: 12),
+          PopupMenuButton<String>(
+            tooltip: 'Choose routing mode',
+            color: palette.surface,
+            elevation: 10,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: BorderSide(color: palette.border),
+            ),
+            offset: const Offset(0, -8),
+            onSelected: onSelectRouteMode,
+            itemBuilder: (context) {
+              return const [
+                _RouteModeMenuEntry(
+                  value: 'tun',
+                  title: 'TUN',
+                  subtitle:
+                      'Intercepts all system traffic through a virtual network adapter.',
+                ),
+                _RouteModeMenuEntry(
+                  value: 'system_proxy',
+                  title: 'System Proxy',
+                  subtitle:
+                      'Sets the Windows system proxy for applications that respect it.',
+                ),
+                _RouteModeMenuEntry(
+                  value: 'local_proxy_gate',
+                  title: 'Local Proxy Gate',
+                  subtitle:
+                      'Hosts a local proxy server without changing system settings.',
+                ),
+              ];
+            },
+            child: _RouteInlineButton(
+              width: 138,
+              text: _routeModeLabel(activeMode),
+            ),
+          ),
+        ],
+      );
+    }
+
+    Widget routePresetSelector() {
       return Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -2929,39 +3257,36 @@ class _DetailBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
-          Material(
-            color: palette.input,
-            borderRadius: BorderRadius.circular(10),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(10),
-              onTap: onOpenRoutes,
-              child: Container(
-                width: 148,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: palette.border),
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        activeRoute,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: palette.text,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
+          PopupMenuButton<RoutePreset>(
+            tooltip: 'Choose route preset',
+            color: palette.surface,
+            elevation: 10,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: BorderSide(color: palette.border),
+            ),
+            offset: const Offset(0, -8),
+            onSelected: onSelectRoutePreset,
+            itemBuilder: (context) {
+              return routePresets
+                  .map(
+                    (preset) => PopupMenuItem<RoutePreset>(
+                      value: preset,
+                      child: _RoutePresetMenuItem(
+                        title: _quickPresetLabel(preset),
+                        subtitle: _quickPresetDescription(preset),
+                        selected: _activeRouteMatchesPreset(
+                          activeRoute,
+                          preset,
                         ),
                       ),
                     ),
-                    Icon(Icons.keyboard_arrow_down_rounded,
-                        color: palette.muted, size: 18),
-                  ],
-                ),
-              ),
+                  )
+                  .toList(growable: false);
+            },
+            child: _RouteInlineButton(
+              width: 148,
+              text: _activeRouteLabel(activeRoute, routePresets),
             ),
           ),
         ],
@@ -2979,9 +3304,15 @@ class _DetailBar extends StatelessWidget {
             children: [
               pillWrap,
               const SizedBox(height: 10),
-              Align(
-                alignment: Alignment.centerRight,
-                child: routeSelector(),
+              Wrap(
+                alignment: WrapAlignment.end,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 14,
+                runSpacing: 10,
+                children: [
+                  routeModeSelector(),
+                  routePresetSelector(),
+                ],
               ),
             ],
           );
@@ -2991,10 +3322,207 @@ class _DetailBar extends StatelessWidget {
           children: [
             Expanded(child: pillWrap),
             const SizedBox(width: 12),
-            routeSelector(),
+            routeModeSelector(),
+            const SizedBox(width: 14),
+            routePresetSelector(),
           ],
         );
       },
+    );
+  }
+}
+
+String _routeModeLabel(String mode) {
+  return switch (mode) {
+    'system_proxy' => 'System Proxy',
+    'local_proxy_gate' => 'Local Proxy Gate',
+    _ => 'TUN',
+  };
+}
+
+String _quickPresetLabel(RoutePreset preset) {
+  return switch (preset.id) {
+    'proxy_all' => 'Proxy All',
+    'bypass_ru' => 'Bypass RU',
+    'list_only' => 'List Only',
+    'direct' => 'Direct Connection',
+    _ => preset.name,
+  };
+}
+
+String _quickPresetDescription(RoutePreset preset) {
+  return switch (preset.id) {
+    'proxy_all' => 'Absolutely all device traffic is routed through the proxy.',
+    'bypass_ru' =>
+      'Traffic to Russian resources goes directly, foreign sites via proxy.',
+    'list_only' =>
+      'Only domains and IP addresses you manually added will be routed.',
+    'direct' => 'Proxy is not used for routing; traffic goes directly.',
+    _ => preset.description,
+  };
+}
+
+String _activeRouteLabel(String activeRoute, List<RoutePreset> presets) {
+  for (final preset in presets) {
+    if (_activeRouteMatchesPreset(activeRoute, preset)) {
+      return _quickPresetLabel(preset);
+    }
+  }
+
+  return activeRoute.isEmpty ? 'Default' : activeRoute;
+}
+
+bool _activeRouteMatchesPreset(String activeRoute, RoutePreset preset) {
+  return preset.id == activeRoute ||
+      preset.name == activeRoute ||
+      _quickPresetLabel(preset) == activeRoute;
+}
+
+class _RouteInlineButton extends StatelessWidget {
+  const _RouteInlineButton({
+    required this.width,
+    required this.text,
+  });
+
+  final double width;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = PohPalette.of(context);
+    return Container(
+      width: width,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      decoration: BoxDecoration(
+        color: palette.input,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: palette.border),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: palette.text,
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          Icon(Icons.keyboard_arrow_down_rounded,
+              color: palette.muted, size: 18),
+        ],
+      ),
+    );
+  }
+}
+
+class _RouteModeMenuEntry extends PopupMenuEntry<String> {
+  const _RouteModeMenuEntry({
+    required this.value,
+    required this.title,
+    required this.subtitle,
+  });
+
+  final String value;
+  final String title;
+  final String subtitle;
+
+  @override
+  double get height => 64;
+
+  @override
+  bool represents(String? value) => value == this.value;
+
+  @override
+  State<_RouteModeMenuEntry> createState() => _RouteModeMenuEntryState();
+}
+
+class _RouteModeMenuEntryState extends State<_RouteModeMenuEntry> {
+  @override
+  Widget build(BuildContext context) {
+    final palette = PohPalette.of(context);
+    return InkWell(
+      onTap: () => Navigator.pop<String>(context, widget.value),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              widget.title,
+              style: TextStyle(
+                color: palette.text,
+                fontWeight: FontWeight.w900,
+                fontSize: 13,
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              widget.subtitle,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: palette.muted, fontSize: 11.5),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RoutePresetMenuItem extends StatelessWidget {
+  const _RoutePresetMenuItem({
+    required this.title,
+    required this.subtitle,
+    required this.selected,
+  });
+
+  final String title;
+  final String subtitle;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = PohPalette.of(context);
+    return SizedBox(
+      width: 250,
+      child: Row(
+        children: [
+          Icon(
+            selected ? Icons.check_circle_rounded : Icons.route_rounded,
+            color: selected ? palette.accent : palette.muted,
+            size: 18,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    color: palette.text,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 13,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  subtitle,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: palette.muted, fontSize: 11.5),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -3441,70 +3969,55 @@ class _PingLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
-    if (pingMs <= 0) {
-      return Row(
+    final hasPing = pingMs > 0;
+    final color = !hasPing
+        ? palette.muted.withValues(alpha: 0.55)
+        : pingMs < 35
+            ? const Color(0xFF3A9B6E)
+            : pingMs < 60
+                ? const Color(0xFFC4A343)
+                : const Color(0xFFC46A4F);
+
+    return SizedBox(
+      height: 18,
+      child: Row(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Container(
             width: 7,
             height: 7,
-            decoration: BoxDecoration(
-              color: palette.muted.withValues(alpha: 0.55),
-              shape: BoxShape.circle,
-            ),
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
           ),
           const SizedBox(width: 5),
-          Text(
-            '-',
+          Text.rich(
+            TextSpan(
+              text: hasPing ? '$pingMs' : '-',
+              children: [
+                TextSpan(
+                  text: ' ms',
+                  style: TextStyle(
+                    color: palette.muted,
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+            strutStyle: const StrutStyle(
+              forceStrutHeight: true,
+              fontSize: 12.5,
+              height: 1.0,
+            ),
             style: TextStyle(
-              color: palette.muted,
+              color: hasPing ? color : palette.muted,
               fontSize: 12.5,
               fontWeight: FontWeight.w800,
-            ),
-          ),
-          const SizedBox(width: 2),
-          Text(
-            'ms',
-            style: TextStyle(
-              color: palette.muted,
-              fontSize: 10,
+              height: 1.0,
             ),
           ),
         ],
-      );
-    }
-
-    final color = pingMs < 35
-        ? const Color(0xFF3A9B6E)
-        : pingMs < 60
-            ? const Color(0xFFC4A343)
-            : const Color(0xFFC46A4F);
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 7,
-          height: 7,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-        ),
-        const SizedBox(width: 5),
-        Text(
-          '$pingMs',
-          style: TextStyle(
-            color: color,
-            fontSize: 12.5,
-            fontWeight: FontWeight.w800,
-          ),
-        ),
-        const SizedBox(width: 2),
-        Text(
-          'ms',
-          style: TextStyle(
-            color: PohPalette.of(context).muted,
-            fontSize: 10,
-          ),
-        ),
-      ],
+      ),
     );
   }
 }
@@ -3527,54 +4040,51 @@ class _CoreTabButton extends StatelessWidget {
     final palette = PohPalette.of(context);
     return Padding(
       padding: const EdgeInsets.only(right: 4),
-      child: Transform.translate(
-        offset: Offset(0, active ? 1 : 0),
-        child: Material(
-          color: active ? palette.surface : Colors.transparent,
+      child: Material(
+        color: active ? palette.surface : Colors.transparent,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(10)),
+        child: InkWell(
           borderRadius: const BorderRadius.vertical(top: Radius.circular(10)),
-          child: InkWell(
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(10)),
-            onTap: onPressed,
-            child: Container(
-              height: active ? 41 : 34,
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              decoration: BoxDecoration(
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(10)),
-                border: active
-                    ? Border(
-                        top: BorderSide(color: palette.border),
-                        left: BorderSide(color: palette.border),
-                        right: BorderSide(color: palette.border),
-                        // No bottom border — the tab "sits" on the content container line
-                        bottom: BorderSide(color: palette.surface, width: 1),
-                      )
-                    : Border.all(color: Colors.transparent),
-                boxShadow: active
-                    ? [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.10),
-                          blurRadius: 10,
-                          offset: const Offset(0, -1),
-                        ),
-                      ]
-                    : null,
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _CoreMark(core: core, compact: true),
-                  const SizedBox(width: 8),
-                  Text(
-                    core.name,
-                    style: TextStyle(
-                      color: active ? palette.text : palette.muted,
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w800,
-                    ),
+          onTap: onPressed,
+          child: Container(
+            height: 36,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            decoration: BoxDecoration(
+              borderRadius:
+                  const BorderRadius.vertical(top: Radius.circular(10)),
+              border: active
+                  ? Border(
+                      top: BorderSide(color: palette.border),
+                      left: BorderSide(color: palette.border),
+                      right: BorderSide(color: palette.border),
+                      // No bottom border — the tab "sits" on the content container line
+                      bottom: BorderSide(color: palette.surface, width: 1),
+                    )
+                  : Border.all(color: Colors.transparent),
+              boxShadow: active
+                  ? [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.10),
+                        blurRadius: 10,
+                        offset: const Offset(0, -1),
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _CoreMark(core: core, compact: true),
+                const SizedBox(width: 8),
+                Text(
+                  core.name,
+                  style: TextStyle(
+                    color: active ? palette.text : palette.muted,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w800,
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),
@@ -3775,16 +4285,21 @@ class _HeaderIconButton extends StatelessWidget {
       message: tooltip,
       child: Padding(
         padding: EdgeInsets.only(bottom: bottomPadding),
-        child: IconButton(
-          visualDensity: VisualDensity.compact,
-          splashRadius: 17,
-          tooltip: tooltip,
-          color: palette.muted,
-          hoverColor: danger
-              ? const Color(0xFFB94444).withValues(alpha: 0.16)
-              : palette.hover,
-          onPressed: onPressed,
-          icon: Icon(icon, size: 18),
+        child: SizedBox(
+          width: 34,
+          height: 34,
+          child: IconButton(
+            padding: EdgeInsets.zero,
+            visualDensity: VisualDensity.compact,
+            splashRadius: 17,
+            tooltip: tooltip,
+            color: palette.muted,
+            hoverColor: danger
+                ? const Color(0xFFB94444).withValues(alpha: 0.16)
+                : palette.hover,
+            onPressed: onPressed,
+            icon: Icon(icon, size: 18),
+          ),
         ),
       ),
     );

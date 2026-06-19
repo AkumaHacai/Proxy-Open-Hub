@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -65,122 +67,138 @@ class _ImportProfileShellState extends State<ImportProfileShell> {
   @override
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
-    return Container(
-      width: 680,
-      height: 540,
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        color: palette.background,
-        borderRadius: BorderRadius.circular(26),
-        border: Border.all(color: palette.border),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.28),
-            blurRadius: 42,
-            offset: const Offset(0, 18),
-          ),
-        ],
-      ),
-      child: Column(
-        children: [
-          _ImportTitleBar(
-            selectedCore: _selectedCore,
-            autoDetect: _selectedCoreId == 'auto',
-            onClose: widget.onClose,
-          ),
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 22, 24, 18),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    _selectedCore == null
-                        ? 'Import server profile'
-                        : 'Import ${_selectedCore!.name} profile',
-                    style: TextStyle(
-                      color: palette.text,
-                      fontSize: 26,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'Choose a target core, then paste a profile. Secrets are protected by the Rust backend and risky fields are shown before save.',
-                    style: TextStyle(color: palette.muted, fontSize: 13),
-                  ),
-                  const SizedBox(height: 16),
-                  _CoreImportPicker(
-                    cores: widget.cores,
-                    selectedCoreId: _selectedCoreId,
-                    onChanged: (value) {
-                      setState(() {
-                        _selectedCoreId = value;
-                        _coreChangedByUser = true;
-                        _message = null;
-                        _error = null;
-                      });
-                    },
-                  ),
-                  const SizedBox(height: 14),
-                  Expanded(
-                    child: TextField(
-                      controller: _controller,
-                      expands: true,
-                      minLines: null,
-                      maxLines: null,
-                      textAlignVertical: TextAlignVertical.top,
-                      style: TextStyle(
-                        color: palette.text,
-                        fontFamily: 'Consolas',
-                        fontSize: 13,
-                        height: 1.42,
-                      ),
-                      decoration: InputDecoration(
-                        hintText: 'tt://... or [endpoint]\\nhostname = "..."\n',
-                        contentPadding: const EdgeInsets.all(16),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(18),
-                          borderSide: BorderSide(color: palette.border),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(18),
-                          borderSide: BorderSide(color: palette.border),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(18),
-                          borderSide: BorderSide(color: palette.accent),
-                        ),
-                      ),
-                    ),
-                  ),
-                  if (_message != null || _error != null) ...[
-                    const SizedBox(height: 12),
-                    Text(
-                      _error ?? _message!,
-                      style: TextStyle(
-                        color: _error == null
-                            ? palette.accent
-                            : const Color(0xFFE26060),
-                        fontSize: 13,
-                        fontWeight: FontWeight.w800,
-                      ),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxW =
+            constraints.maxWidth.isFinite ? constraints.maxWidth : 680.0;
+        final maxH =
+            constraints.maxHeight.isFinite ? constraints.maxHeight : 540.0;
+        final width = math.min(680.0, maxW);
+        final height = math.min(540.0, maxH);
+        final compact = width < 460;
+        final padding = compact
+            ? const EdgeInsets.fromLTRB(18, 18, 18, 14)
+            : const EdgeInsets.fromLTRB(24, 22, 24, 18);
+
+        return Container(
+          width: width,
+          height: height,
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(
+            color: palette.background,
+            borderRadius: BorderRadius.circular(26),
+            border: Border.all(color: palette.border),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.28),
+                blurRadius: 42,
+                offset: const Offset(0, 18),
               ),
-            ),
+            ],
           ),
-          _ImportFooter(
-            busy: _busy,
-            onPaste: _paste,
-            onImport: _import,
-            onClose: widget.onClose,
+          child: Column(
+            children: [
+              _ImportTitleBar(
+                selectedCore: _selectedCore,
+                autoDetect: _selectedCoreId == 'auto',
+                onClose: widget.onClose,
+              ),
+              Expanded(
+                child: Padding(
+                  padding: padding,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _selectedCore == null
+                            ? 'Import server profile'
+                            : 'Import ${_selectedCore!.name} profile',
+                        style: TextStyle(
+                          color: palette.text,
+                          fontSize: 26,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Choose a target core, then paste a profile. Secrets are protected by the Rust backend and risky fields are shown before save.',
+                        style: TextStyle(color: palette.muted, fontSize: 13),
+                      ),
+                      const SizedBox(height: 16),
+                      _CoreImportPicker(
+                        cores: widget.cores,
+                        selectedCoreId: _selectedCoreId,
+                        onChanged: (value) {
+                          setState(() {
+                            _selectedCoreId = value;
+                            _coreChangedByUser = true;
+                            _message = null;
+                            _error = null;
+                          });
+                        },
+                      ),
+                      const SizedBox(height: 14),
+                      Expanded(
+                        child: TextField(
+                          controller: _controller,
+                          expands: true,
+                          minLines: null,
+                          maxLines: null,
+                          textAlignVertical: TextAlignVertical.top,
+                          style: TextStyle(
+                            color: palette.text,
+                            fontFamily: 'Consolas',
+                            fontSize: 13,
+                            height: 1.42,
+                          ),
+                          decoration: InputDecoration(
+                            hintText:
+                                'tt://... or [endpoint]\\nhostname = "..."\n',
+                            contentPadding: const EdgeInsets.all(16),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(18),
+                              borderSide: BorderSide(color: palette.border),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(18),
+                              borderSide: BorderSide(color: palette.border),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(18),
+                              borderSide: BorderSide(color: palette.accent),
+                            ),
+                          ),
+                        ),
+                      ),
+                      if (_message != null || _error != null) ...[
+                        const SizedBox(height: 12),
+                        Text(
+                          _error ?? _message!,
+                          style: TextStyle(
+                            color: _error == null
+                                ? palette.accent
+                                : const Color(0xFFE26060),
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              _ImportFooter(
+                busy: _busy,
+                onPaste: _paste,
+                onImport: _import,
+                onClose: widget.onClose,
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -428,24 +446,30 @@ class _CoreImportPicker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = PohPalette.of(context);
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      children: [
+    final chips = <Widget>[
+      _CoreImportChip(
+        label: 'Auto',
+        color: palette.accent,
+        selected: selectedCoreId == 'auto',
+        onPressed: () => onChanged('auto'),
+      ),
+      for (final core in cores)
         _CoreImportChip(
-          label: 'Auto',
-          color: palette.accent,
-          selected: selectedCoreId == 'auto',
-          onPressed: () => onChanged('auto'),
+          label: core.name,
+          color: core.accent,
+          selected: selectedCoreId == core.id,
+          onPressed: () => onChanged(core.id),
         ),
-        for (final core in cores)
-          _CoreImportChip(
-            label: core.name,
-            color: core.accent,
-            selected: selectedCoreId == core.id,
-            onPressed: () => onChanged(core.id),
-          ),
-      ],
+    ];
+
+    return SizedBox(
+      height: 34,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: chips.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (_, index) => chips[index],
+      ),
     );
   }
 }
@@ -475,19 +499,21 @@ class _CoreImportChip extends StatelessWidget {
         child: Container(
           height: 32,
           padding: const EdgeInsets.symmetric(horizontal: 12),
-          alignment: Alignment.center,
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(999),
             border: Border.all(
               color: selected ? color.withValues(alpha: 0.55) : palette.border,
             ),
           ),
-          child: Text(
-            label,
-            style: TextStyle(
-              color: selected ? palette.text : palette.muted,
-              fontSize: 12,
-              fontWeight: FontWeight.w800,
+          child: Center(
+            widthFactor: 1,
+            child: Text(
+              label,
+              style: TextStyle(
+                color: selected ? palette.text : palette.muted,
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+              ),
             ),
           ),
         ),
